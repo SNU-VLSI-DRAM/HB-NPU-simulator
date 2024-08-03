@@ -1,5 +1,5 @@
 
-# HBDRAMsim
+# HB-NPU Simulator
 
 
 
