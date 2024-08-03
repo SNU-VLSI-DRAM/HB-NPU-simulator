@@ -125,6 +125,7 @@ You can generate the LLM workload and traces by running our custom python progra
 ```
 pip install configparser
 pip install openpyxl
+pip install numpy
 ```
 Firstly, you should make workload file of matmul kernel. 
 
