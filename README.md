@@ -1,5 +1,5 @@
 
-# HB-NPU Simulator
+# HBNPU Simulator
 
 
 
