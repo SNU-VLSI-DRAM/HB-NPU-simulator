@@ -121,6 +121,11 @@ num_pim_read_cmds              =        10272   # Number of READ/READP commands
 pim_read_energy                =  1.08472e+06   # Read energy
 ```
 ### Running a custom workload
+You can generate the LLM workload and traces by running our custom python programs, requiring following python packages to be installed:
+```
+pip install configparser
+pip install openpyxl
+```
 Firstly, you should make workload file of matmul kernel. 
 
 Example of 128x256x1 GEMV with (mcf,ucf) = (2,8) :
