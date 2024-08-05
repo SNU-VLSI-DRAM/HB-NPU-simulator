@@ -81,9 +81,9 @@ def gen_pim_trace(workload, trace_file, row_addr):
                 dim = int(dim/2) # GEMM interleaving
             if (df == 1): # N[i] == 1 (mcf*ucf == 16)
                 if (j == 0):
-                    loadaddr += max(1, dim/mcf) * (2**exp)
+                    loadaddr += max(1, int(dim/mcf)) * (2**exp)
                 elif (j == 1):
-                    loadaddr += max(1, dim/ucf) * (2**exp)
+                    loadaddr += max(1, int(dim/ucf)) * (2**exp)
                 else:
                     loadaddr += dim*ucf * (2**exp)
             else:
