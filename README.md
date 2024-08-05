@@ -53,7 +53,26 @@ python3 run_demo.py -m OPT-66B -i 1024 -o 128 -b 128
 ```
 You can check the detailed results reported to ```result.xlsx```.
 
-### Running an example workload
+### Creating new trace files and workloads
+You can generate the LLM trace files by running ```gen_LLM_trace.py```. 
+```bash
+# generate traces for OPT-2.7B with input tokens 1024, output tokens 128, and batch size 128
+python3 gen_LLM_trace.py -s configs/HBM2_8Gb_x128.ini -i 1024 -o 128 -b 128 -m OPT-2.7B
+```
+
+Also you can generate the new LLM workloads by running ```gen_workload_prompt.py``` and ```gen_workload_decode.py```.
+```
+# generating prompt workload for 128 tokens.
+python3 gen_workload_prompt.py -s 128
+# generating decode workload for tokens from 10-th to 1600-th generation and batch sizes from 32 to 128 (32, 64, 128, power of twos).
+python3 gen_workload_decode.py -s 10 -e 1600 -sb 32 -eb 128
+```
+Or you can add a new model configuration by adding it to ```models``` file and re-run the above generators.
+```
+# [model_name] [parameter size (B)] [# of layers] [d_model] [# of heads] [d_head] [TP] [PP]
+OPT-2.7B 2.7 32 2560 32 80 32 1
+```
+### Running an example trace file
 You can run HB-NPU with a sample trace of a matrix multiplication kernel using the below command.
 Trace files are in ```traces/``` folder.
 ```bash
@@ -125,26 +144,6 @@ num_lh_read_cmds              =        10272
 num_gh_read_row_hits          =        1435   
 num_gh_read_cmds              =        1500   
 ```
-### Creating new trace files and workloads
-You can generate the LLM trace files by running ```gen_LLM_trace.py```. 
-```bash
-# generate traces for OPT-2.7B with input tokens 1024, output tokens 128, and batch size 128
-python3 gen_LLM_trace.py -s configs/HBM2_8Gb_x128.ini -i 1024 -o 128 -b 128 -m OPT-2.7B
-```
-
-Also you can generate the new LLM workloads by running ```gen_workload_prompt.py``` and ```gen_workload_decode.py```.
-```
-# generating prompt workload for 128 tokens.
-python3 gen_workload_prompt.py -s 128
-# generating decode workload for tokens from 10-th to 1600-th generation and batch sizes from 32 to 128 (32, 64, 128, power of twos).
-python3 gen_workload_decode.py -s 10 -e 1600 -sb 32 -eb 128
-```
-Or you can add a new model configuration by adding it to ```models``` file and re-run the above generators.
-```
-# [model_name] [parameter size (B)] [# of layers] [d_model] [# of heads] [d_head] [TP] [PP]
-OPT-2.7B 2.7 32 2560 32 80 32 1
-```
-
 ## Code Structure
 
 ```
