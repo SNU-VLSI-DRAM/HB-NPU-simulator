@@ -15,6 +15,10 @@ parser.add_argument("-b", default=64, help="batch size")
 parser.add_argument("-s", default="configs/HBM2_8Gb_x128.ini", help="specification of DRAM")
 
 def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
+
+    if not os.path.exists('logs'):
+        os.makedirs('logs')
+
     print("Trace file checking..")
     workload = "_".join([model, str(in_tokens), str(out_tokens), str(batch_size)])
     print("Workload: " + workload)
