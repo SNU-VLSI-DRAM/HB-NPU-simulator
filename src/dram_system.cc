@@ -210,7 +210,7 @@ void JedecDRAMSystem::ClockTick() {
     }
 
 
-
+    //*** Custom Transaction Queue Manager ***//
     // Pop a PIM transaction if the queue is not empty
     if (!pim_trans_queue_.empty()) {
         int cut_no;
@@ -371,6 +371,7 @@ void JedecDRAMSystem::ClockTick() {
             is_in_ref = true;
     }
 
+    //*** HB-NPU Command Scheduler ***//
     // We are currently developing multi-tenant workload support in the NPU by partitioning the array and running them independently.
     // Please ignore these variables (~cut~) for now.
     int cuts = 0;
@@ -390,14 +391,14 @@ void JedecDRAMSystem::ClockTick() {
         int K_tile_size = std::min(cut_height * 16, K[i]); // 16: the number of PEs supported by a bank's io
 
 
-        int weight_banks_reduce = df==0? 8:16; // BLP option for weight loading
+        int weight_banks_reduce = df==0? 8:16; // Bank Interleaving option for weight loading
         std::vector<std::vector<Command>> in_cmds(cuts);
         std::vector<std::vector<Command>> w_cmds(cuts);
 
         bool output_ready = iw_status[i] == 3;
 
         // std::cout<<iw_status[i]<<"iw_status\n";
-        // Our PIM command scheduler changes iw_status value to switch the BLAS functions between loading data into PE array registers and streaming data into the array.
+        // Our custom command scheduler changes iw_status value to switch the BLAS functions between loading data into PE array registers and streaming data into the array.
         // It manages matrix multiplication progress by monitoring and updating the BLAS status and NPU status
         switch (iw_status[i]) {
             case 0: { // data loading into PE registers
@@ -410,7 +411,7 @@ void JedecDRAMSystem::ClockTick() {
                 int col_offset = N_tile_it * (N_tile_size_per_bank * ((K[i]-1) / K_tile_size + 1)) + K_tile_it[i] * N_tile_size_per_bank + N_it[i] % N_tile_size; // N_it incremented by N_tile_size when N_it % N_tile_size_per_bank == 0 (but not with N_tile_size)
                 // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
                 for (int j=0; j<cut_height; j++) {
-                    // It can read multiple banks or only one bank per channel, but fixed to one bank for now.
+                    // It can read multiple banks for bank interleaving or only one bank per channel
                     for (int k=0; k<cut_width/weight_banks_reduce; k++) {
                         int ch = hcut_no * cut_height + j;
                         int bk = vcut_no * cut_width + k * weight_banks_reduce;
@@ -462,7 +463,7 @@ void JedecDRAMSystem::ClockTick() {
                         break;
                     }
 
-                    // increment iterators
+                    // increment BLAS iterators
                     N_it[i]++;
                     if (N_it[i] % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || N_it[i] % N_tile_size != 0)) {
                         N_it[i] = N_tile_size * N_tile_it;
@@ -475,7 +476,7 @@ void JedecDRAMSystem::ClockTick() {
             }
             case 1: { // Finished data loading
                 // wait npu signals
-                // For not multi-tenant cases, advance to next stage immediately.
+                // For non-multi-tenant cases, advance to next stage immediately.
                 iw_status[i]++;
                 vpu_cnt[i] = 1;
                 if (cuts == 1) { //N[i]==1) { //TODO support for MT
@@ -490,6 +491,7 @@ void JedecDRAMSystem::ClockTick() {
             }
             case 2: { // Streaming data into PE array
                 CommandType act_type = CommandType::PIM_ACTIVATE;
+                // Weight stationary dataflow opts to use Global HB, while TS-GEMM/GEMV dataflow uses Local HB.
                 CommandType read_type = df == 0 ? CommandType::GH_READ : CommandType::LH_READ;
                 CommandType readp_type = df == 0 ? CommandType::GH_READ_PRECHARGE : CommandType::LH_READ_PRECHARGE;
                 vpu_cnt[i]--;
@@ -500,7 +502,7 @@ void JedecDRAMSystem::ClockTick() {
                 Command mixed_cmd;
                 // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
                 for (int j=0; j<cut_height; j++) {
-                    // It can generate commands for multiple banks per channel simultaneously depending on the multi-column configuration.
+                    // It can generate commands for multiple banks per channel simultaneously depending on the dataflow configuration.
                     for (int k=0; k<mc; k++) {
 
                         int ch = hcut_no * cut_height + j;
@@ -513,7 +515,7 @@ void JedecDRAMSystem::ClockTick() {
                         Address addr = Address(ch, 0, bg, bk, base_rows_in[i] + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
                         uint64_t hex_addr = config_.AddressUnmapping(addr);
                         bool close = M_it[i] + 1 == M[i]; // prevent closing between tiles
-                        bool close2 = (K_tile_it[i]+1) * K_tile_size >= K[i]; // leave open in GEMM since batch size is too small in LLMs
+                        bool close2 = (K_tile_it[i]+1) * K_tile_size >= K[i]; // leave open in WS since batch size is too small in LLMs
                         bool close3 = df==0?close2 && close:close;
                         // generate read-precharge command if this is the last access to read the tile.
                         CommandType cmd_type = close3 || addr.column == config_.columns / config_.BL - 1 ? readp_type : read_type;
@@ -661,8 +663,7 @@ void JedecDRAMSystem::ClockTick() {
             int cut_height_out = cut_height < vcuts ? 1 : cut_height / vcuts;
             for (int j=0; j<cut_height_out; j++) {
 
-                // It can generate commands for multiple banks per channel simultaneously depending on the multi-column configuration.
-                // but it can send the same data only because the data bus is shared between the banks.
+                // It can generate commands for multiple banks per channel simultaneously depending for bank interleaving.
                 int ch = hcut_no * cut_height + vcut_out_no * cut_height_out + j;
                 int k_bound = df == 1 ? 1 : M[i] == 1 || true ? mc : 1;
                 for (int k=0; k<k_bound; k++) {
@@ -746,7 +747,7 @@ void JedecDRAMSystem::ClockTick() {
 
         }
 
-        // Finally the scheduler sends the aggregated commands to channel controllers by pushing them into PIM command queues, which are managed in-order.
+        // Finally the scheduler sends the aggregated commands to channel controllers by pushing them into custom command queues, which are managed in-order.
         for (auto& it: w_cmds) {
             for (auto& it2: it) {
                // std::cout<<clk_<<" "<<it<<std::endl;

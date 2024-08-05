@@ -3,12 +3,34 @@ import argparse
 import math
 import openpyxl
 import json
+from communication_cost import*
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", default="traces", help="trace path")
 parser.add_argument("-n", default="Sheet", help="sheet name")
+parser.add_argument("-m", default="OPT_2.7B", help="Model to run")
+parser.add_argument("-i", default=1024, help="input tokens")
+parser.add_argument("-o", default=128, help="output tokens")
+parser.add_argument("-b", default=64, help="batch size")
+parser.add_argument("-s", default="configs/HBM2_8Gb_x128.ini", help="specification of DRAM")
 
-def run(path, name):
+def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
+    print("Trace file checking..")
+    workload = "_".join([model, str(in_tokens), str(out_tokens), str(batch_size)])
+    print("Workload: " + workload)
+    trace_folder = "traces/" +  workload
+    if not os.path.exists(trace_folder):
+        raise Exception("Traces do not exist! Generate traces first.")
+
+    print("Model configuration checking..")
+    fin_ = open('models', 'r')
+    lines = fin_.readlines()
+    lines_parsed = [line.strip().split(' ') for line in lines if line.strip().split(' ')[0] == model]
+    if not lines_parsed:
+        raise Exception("Model Not Found!")
+    else:
+        _, params, n_layers, d_model, n_heads, d_head, TP, PP = lines_parsed[0]
+
 
     layer_dict = {"createQKV":'B', "QK":'C', "SV":'D', "Wo":'E', "L1":'F', "L2":'G'}
     if os.path.exists('result.xlsx'):
@@ -16,103 +38,139 @@ def run(path, name):
     else:
         wb = openpyxl.Workbook()
 
-    fin = open("models_s", 'r')
-    lines = fin.readlines()
-    for line in lines:
-        model, n_layers, d_model, n_heads, d_head, par, PP = line.strip().split(' ')
-        par = int(par)
-        '''
-        sum_path = "traces/" + model + "/SUM"
-        slist = sorted(os.listdir(sum_path))
-        name = model + "_SUM"
-        if name in wb.get_sheet_names():
-            wb.remove_sheet(wb.get_sheet_by_name(name))
+    if workload in wb.sheetnames:
+        wb.remove(wb[workload])
 
-        wb.create_sheet(title=name)
-        sh = wb.get_sheet_by_name(name)
+    wb.create_sheet(title=workload)
+    sh = wb[workload]
 
-        sh['A'+str(1)] = 'batch_multicolumns'
-        sh['B'+str(1)] = 'createQKV'
-        sh['C'+str(1)] = 'QK'
-        sh['D'+str(1)] = 'SV'
-        sh['E'+str(1)] = 'Wo'
-        sh['F'+str(1)] = 'L1'
-        sh['G'+str(1)] = 'L2'
-        sh['H'+str(1)] = 'total cycles'
-        for i, s in enumerate(slist):
-            sh['A'+str(i+2)] = s
-            # bs = s.split('_')[0]
+    # TODO assuming tCK=1ns
+    sh['A'+str(2)] = 'prompt runtime (ns)'
+    sh['A'+str(3)] = 'prompt energy (pJ)'
+    sh['A'+str(4)] = 'decoder runtime (ns)'
+    sh['A'+str(5)] = 'decode energy (pJ)'
 
-            flist = sorted(os.listdir(sum_path + '/' + s))
-            for j, f in enumerate(flist):
-                print(model, s, f)
-                if f == "QK" or f == "SV":
-                    continue
+    sh['B'+str(1)] = 'createQKV'
+    sh['C'+str(1)] = 'QK'
+    sh['D'+str(1)] = 'SV'
+    sh['E'+str(1)] = 'Wo'
+    sh['F'+str(1)] = 'L1'
+    sh['G'+str(1)] = 'L2'
+    sh['H'+str(1)] = 'total'
+    sh['I'+str(1)] = 'throughput (K tokens/s)'
 
-                os.system("echo " + f + " >> logs/" + model + "_SUM_" + s + ".log")
-                os.system("./build/dramsim3main configs/HBM2_8Gb_x128.ini -c 10000000 -t " + sum_path + '/' + s + '/' + f  + " >> logs/" + model + "_SUM_" + s + ".log")
+    print("\nRunning prompt (summarization) phase..")
+    prompt_folder = trace_folder + "/prompt/"
+    flist = sorted(os.listdir(prompt_folder))
+    for f in flist:
 
+        os.system("echo " + f + " >> logs/" + workload + "_prompt.log")
+        os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + prompt_folder + f  + " >> logs/" + workload + "_prompt.log")
+
+        with open('dramsim3.json') as df:
+            json_object = json.load(df)
+            cycles = json_object['0']['num_cycles']
+            energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])
+            if cycles == 10000000:
+                raise Exception("compute not finished! prompt: " + f)
+            cycles *= int(n_layers)
+            energy *= int(n_layers)
+            if f == "createQKV":
+                cycles *= 3
+                energy *= 3
+            elif f == "QK" or f == "SV":
+                cycles *= int(n_heads)
+
+            sh[layer_dict[f] + str(2)] = cycles
+            sh[layer_dict[f] + str(3)] = energy
+    total_cycles = sum([int(str(sh[a+str(2)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(2)].value is not None])
+    total_energy = sum([float(str(sh[a+str(3)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(3)].value is not None])
+    sh['H'+str(2)] = total_cycles
+    sh['H'+str(3)] = total_energy
+
+    print("Prompt runtime: " + str(total_cycles) + " ns")
+    print("Prompt energy: {:.2f} pJ".format(total_energy))
+
+
+    print("\nRunning decode (generation) phase..")
+
+    decode_folder = trace_folder + "/decode/"
+    flist = sorted(os.listdir(decode_folder))
+
+    QK_cycles, QK_energy, SV_cycles, SV_energy = 0, 0, 0, 0
+    for f in flist:
+        if os.path.isdir(decode_folder + f):
+            for ff in os.listdir(decode_folder + f):
+
+                os.system("echo " + ff + " >> logs/" + workload + "_decode.log")
+                os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + decode_folder + f  + '/' + ff  + " >> logs/" + workload + "_decode.log")
                 with open('dramsim3.json') as df:
                     json_object = json.load(df)
-                    cycles = json_object['0']['num_cycles']
+                    cycles = json_object['0']['num_cycles']*int(n_layers)
+                    energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])*int(n_layers)
                     if cycles == 10000000:
-                        raise Exception("compute not finished!")
-                    cycles *= int(n_layers)
-                    if f == "createQKV":
-                        cycles *= 3
-                    elif f == "QK" or f == "SV":
-                        cycles *= int(n_heads)/par
-                    sh[layer_dict[f] + str(i+2)] = cycles
-            total_cycles = sum([int(str(sh[a+str(i+2)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(i+2)].value is not None])
-            sh['H'+str(i+2)] = total_cycles*int(n_layers)
-        '''
-        mcfs = [1, 2, 4, 8, 16]
-        gen_paths = ["traces/" + model + "/GEN_mcf" + str(i) for i in mcfs]
-        for gpi, gen_path in enumerate(gen_paths):
-
-            flist = sorted(os.listdir(gen_path))
-            name = model + "_GEN_mcf" + str(mcfs[gpi])
-            if name in wb.get_sheet_names():
-                wb.remove_sheet(wb.get_sheet_by_name(name))
-
-            wb.create_sheet(title=name)
-            sh = wb.get_sheet_by_name(name)
-            sh['A'+str(1)] = 'KV_cache_len'
-            sh['B'+str(1)] = 'createQKV'
-            sh['C'+str(1)] = 'QK'
-            sh['D'+str(1)] = 'SV'
-            sh['E'+str(1)] = 'Wo'
-            sh['F'+str(1)] = 'L1'
-            sh['G'+str(1)] = 'L2'
-            for i, f in enumerate(flist):
-                    print(model, f)
-                    if "QK" not in f and "SV" not in f:
-                        pass
-                    elif f == "createQKV":
-                        pass
+                        raise Exception("compute not finished! decode: "+ f +' '+ ff)
+                    if "QK_" in ff:
+                        # parallelized by 16 Subarrays
+                        QK_cycles += cycles*int(max(int(math.ceil(float(n_heads)/int(TP)))*batch_size/int(PP)/16, 1))
+                        QK_energy += energy*max(int(math.ceil(float(n_heads)/int(TP)))*batch_size/int(PP)/16, 1)
+                    elif "SV_" in ff:
+                        SV_cycles += cycles*int(max(int(math.ceil(float(n_heads)/int(TP)))*batch_size/int(PP)/16, 1))
+                        SV_energy += energy*max(int(math.ceil(float(n_heads)/int(TP)))*batch_size/int(PP)/16, 1)
                     else:
-                        continue
+                        cycles *= out_tokens
+                        energy *= out_tokens
+                        if ff == "createQKV":
+                            cycles *= 3
+                            energy *= 3
+                        sh[layer_dict[ff] + '4'] = int(min(cycles, int(str(sh[layer_dict[ff]+'4'].value)))) if sh[layer_dict[ff]+'4'].value is not None else cycles
+                        sh[layer_dict[ff] + '5'] = min(energy, float(str(sh[layer_dict[ff]+'5'].value))) if sh[layer_dict[ff]+'5'].value is not None else energy
 
-                    os.system("echo " + f + " >> logs/" + model + "_GEN_mcf" + str(mcfs[gpi]) + ".log")
-                    os.system("./build/dramsim3main configs/HBM2_8Gb_x128.ini -c 5000000 -t " + gen_path + '/' + f  + " >> logs/" + model + "_GEN_mcf" + str(mcfs[gpi]) + ".log")
 
-                    with open('dramsim3.json') as df:
-                        json_object = json.load(df)
-                        cycles = json_object['0']['num_cycles']
-                        if cycles == 5000000:
-                            raise Exception("compute not finished!")
-                        if "QK_" in f or "SV_" in f:
-                            l, ii = f.split('_')
-                            sh['A'+ii] = int(ii)
-                            sh[layer_dict[l] + ii] = cycles
-                        else:
-                            sh[layer_dict[f] + '2'] = cycles
-`                   # * #L * BS / min(BS*H, 16)
 
-        wb.save('result.xlsx')
+        else:
+
+            os.system("echo " + f + " >> logs/" + workload + "_decode.log")
+            os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + decode_folder + f + " >> logs/" + workload + "_decode.log")
+
+
+            with open('dramsim3.json') as df:
+                json_object = json.load(df)
+                cycles = json_object['0']['num_cycles']*int(n_layers)
+                energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])*int(n_layers)
+                if cycles == 10000000:
+                    raise Exception("compute not finished! decode TSGEMM: " + f)
+                # granularity of batch size 8 in TS-GEMM dataflow
+                cycles *= int(out_tokens*max(batch_size/int(PP)/8,1))
+                energy *= out_tokens*max(batch_size/int(PP)/8,1)
+                if f == "createQKV":
+                    cycles *= 3
+                    energy *= 3
+
+                # Compare to WS dataflow
+                sh[layer_dict[f] + '4'] = int(min(cycles, int(str(sh[layer_dict[f]+'4'].value)))) if sh[layer_dict[f]+'4'].value is not None else cycles
+                sh[layer_dict[f] + '5'] = min(energy, float(str(sh[layer_dict[f]+'5'].value))) if sh[layer_dict[f]+'5'].value is not None else energy
+
+    sh['C' + '4'] = QK_cycles
+    sh['C' + '5'] = QK_energy
+    sh['D' + '4'] = SV_cycles
+    sh['D' + '5'] = SV_energy
+    chips_per_board = 16 # 32 GB per board
+    communication_latency = cost_communication(int(n_layers), int(d_model), out_tokens, batch_size, chips_per_board, int(TP), int(PP))
+
+    total_cycles = sum([int(str(sh[a+str(4)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(4)].value is not None])
+    total_energy = sum([float(str(sh[a+str(5)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(5)].value is not None])
+    sh['H'+str(4)] = total_cycles + communication_latency
+    sh['H'+str(5)] = total_energy
+    throughput = batch_size*out_tokens / (total_cycles+communication_latency) * 10**6
+    sh['I'+str(4)] = throughput
+
+    print("Throughput: {:.2f} K tokens/s".format(throughput))
+    print("Energy: {:.2f} pJ".format(total_energy) + '\n')
+    wb.save('result.xlsx')
     return
 
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    run(args.p, args.n)
+    run(args.p, args.n, args.m, int(args.i), int(args.o), int(args.b), args.s)

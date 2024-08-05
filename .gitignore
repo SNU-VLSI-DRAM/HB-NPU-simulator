@@ -2,8 +2,6 @@
 build/
 debug_build/
 data/
-workloads/
-traces/
 ext/SuperLU_MT_3.1/
 obj
 dramsim3
@@ -49,6 +47,3 @@ release
 # IDEs / Editors
 .vscode/
 
-*.tr
-*.wl
-*.trc

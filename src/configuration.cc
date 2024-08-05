@@ -210,6 +210,8 @@ void Config::InitPowerParams() {
         VDD * (IDD0 * tRC - (IDD3N * tRAS + IDD2N * tRP)) * devices;
     read_energy_inc = VDD * (IDD4R - IDD3N) * burst_cycle * devices;
     write_energy_inc = VDD * (IDD4W - IDD3N) * burst_cycle * devices;
+    // We estimated Local Hybrid bonding read energy by multiplying IO length ratio due to short routing to PEs
+    // Global HB has the same energy increments with normal read since it uses the data bus.
     lh_read_energy_inc = VDD * 0.55 * (IDD4R - IDD3N) * burst_cycle * devices;
     gh_read_energy_inc = VDD * (IDD4R - IDD3N) * burst_cycle * devices;
     pim_write_energy_inc = VDD * (IDD4W - IDD3N) * burst_cycle * devices;
