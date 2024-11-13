@@ -66,13 +66,24 @@ def estimate_communication_overhead_multi_bandwidth(bandwidth_low, latency_low, 
 
     return comm_time
 
-def cost_communication(num_layer, d_model, output_size, batch_size, chips_per_board, TP, PP):
+def cost_communication(num_layer, d_model, token_size, batch_size, chips_per_board, TP, PP, GEN):
 
   communication_latency = 0
   data_volume = int(batch_size / PP) * d_model * 2 #matrix col x row x 2bytes(BF16)
+  if not GEN:
+    data_volume *= token_size
 
-  # GENERATION
-  for current_seq in range(output_size):
+  if (GEN):
+    # GENERATION
+    for current_seq in range(token_size):
+      #there are two all-reduce operation in decorder block according to Megatron-LM
+      for i in range(2):
+        if TP > chips_per_board:
+          communication_latency += estimate_communication_overhead_multi_bandwidth(PCB_trace_bandwidth, PCB_trace_latency, chips_per_board, PCIe_bandwidth, PCIe_latency, int(TP / chips_per_board), data_volume, "all-reduce")
+        else:
+          communication_latency += estimate_communication_overhead(PCB_trace_bandwidth, PCB_trace_latency, data_volume, "all-reduce", TP)
+  else:
+    # SUMMARIZATION
     #there are two all-reduce operation in decorder block according to Megatron-LM
     for i in range(2):
       if TP > chips_per_board:

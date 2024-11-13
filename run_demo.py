@@ -45,9 +45,9 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     sh = wb[workload]
 
     # TODO assuming tCK=1ns
-    sh['A'+str(2)] = 'prompt runtime (ns)'
-    sh['A'+str(3)] = 'prompt energy (pJ)'
-    sh['A'+str(4)] = 'decoder runtime (ns)'
+    sh['A'+str(2)] = 'prefill runtime (ns)'
+    sh['A'+str(3)] = 'prefill energy (pJ)'
+    sh['A'+str(4)] = 'decode runtime (ns)'
     sh['A'+str(5)] = 'decode energy (pJ)'
 
     sh['B'+str(1)] = 'createQKV'
@@ -59,7 +59,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     sh['H'+str(1)] = 'total'
     sh['I'+str(1)] = 'throughput (K tokens/s)'
 
-    print("\nRunning prompt (summarization) phase..")
+    print("\nRunning prefill (summarization) phase..")
     prompt_folder = trace_folder + "/prompt/"
     flist = sorted(os.listdir(prompt_folder))
     for f in flist:
@@ -73,23 +73,30 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
             energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])
             if cycles == 10000000:
                 raise Exception("compute not finished! prompt: " + f)
-            cycles *= int(n_layers)
-            energy *= int(n_layers)
+            cycles *= int(n_layers)*int(max(batch_size/int(PP),1))
+            energy *= int(n_layers)*max(batch_size/int(PP),1)
             if f == "createQKV":
                 cycles *= 3
                 energy *= 3
             elif f == "QK" or f == "SV":
-                cycles *= int(n_heads)
+                cycles *= int(max(int(math.ceil(float(n_heads)/int(TP))), 1))
+                energy *= max(int(math.ceil(float(n_heads)/int(TP))), 1)
+
 
             sh[layer_dict[f] + str(2)] = cycles
             sh[layer_dict[f] + str(3)] = energy
     total_cycles = sum([int(str(sh[a+str(2)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(2)].value is not None])
     total_energy = sum([float(str(sh[a+str(3)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(3)].value is not None])
+    chips_per_board = 16 # 32 GB per board
+    communication_latency = cost_communication(int(n_layers), int(d_model), in_tokens, batch_size, chips_per_board, int(TP), int(PP), False)
+    vector_latency = vector_process(int(n_layers), int(d_model), int(n_heads), int(d_head), int(TP), int(PP), in_tokens, out_tokens, batch_size, False)
+    total_cycles += vector_latency + communication_latency
     sh['H'+str(2)] = total_cycles
     sh['H'+str(3)] = total_energy
 
-    print("Prompt runtime: " + str(total_cycles) + " ns")
-    print("Prompt energy: {:.2f} pJ".format(total_energy))
+
+    print("Prefill runtime: " + str(total_cycles) + " ns")
+    print("Prefill energy: {:.2f} pJ".format(total_energy))
 
 
     print("\nRunning decode (generation) phase..")
@@ -156,19 +163,43 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     sh['D' + '4'] = SV_cycles
     sh['D' + '5'] = SV_energy
     chips_per_board = 16 # 32 GB per board
-    communication_latency = cost_communication(int(n_layers), int(d_model), out_tokens, batch_size, chips_per_board, int(TP), int(PP))
+    communication_latency = cost_communication(int(n_layers), int(d_model), out_tokens, batch_size, chips_per_board, int(TP), int(PP), True)
+    vector_latency = vector_process(int(n_layers), int(d_model), int(n_heads), int(d_head), int(TP), int(PP), in_tokens, out_tokens, batch_size, True)
 
     total_cycles = sum([int(str(sh[a+str(4)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(4)].value is not None])
     total_energy = sum([float(str(sh[a+str(5)].value)) for a in ['B', 'C', 'D', 'E', 'F', 'G'] if sh[a+str(5)].value is not None])
-    sh['H'+str(4)] = total_cycles + communication_latency
+    total_cycles += communication_latency + vector_latency
+    sh['H'+str(4)] = total_cycles
     sh['H'+str(5)] = total_energy
-    throughput = batch_size*out_tokens / (total_cycles+communication_latency) * 10**6
+
+
+    throughput = batch_size*out_tokens / total_cycles * 10**6
     sh['I'+str(4)] = throughput
 
     print("Throughput: {:.2f} K tokens/s".format(throughput))
     print("Energy: {:.2f} pJ".format(total_energy) + '\n')
     wb.save('result.xlsx')
     return
+
+def vector_process(n_layers, d_model, n_heads, d_head, TP, PP, in_tokens, out_tokens, batch_size, GEN):
+    VPU_lanes = 128
+    logic_freq = 1 #GHz
+    if GEN:
+        softmax_flops = int(5*n_heads*(2*in_tokens+out_tokens)/2)
+    else:
+        softmax_flops = int(5*n_heads*in_tokens)
+    relu_flops = d_model*4
+    norm_flops = 5*d_model
+    if GEN:
+        tokens = out_tokens
+    else:
+        tokens = in_tokens
+    total_flops = n_layers * batch_size * tokens * (softmax_flops + relu_flops + 2*norm_flops) / TP / PP
+    latency = total_flops / VPU_lanes / logic_freq
+    return latency
+
+
+
 
 
 if __name__ == "__main__":
