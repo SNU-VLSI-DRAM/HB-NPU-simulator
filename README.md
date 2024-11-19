@@ -41,7 +41,7 @@ By default, it also creates `libdramsim3.so` shared library in the project root 
 
 ### Reproduce the results from the paper
 
-To run all OPT workloads in our evaluation, enter below command.
+To run all OPT workloads in our evaluation, enter below command. (We will add the support for other LLMs soon.)
 It can take about 30 minutes or longer depending on the running environment.
 ```bash
 bash run_models.sh
