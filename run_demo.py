@@ -94,7 +94,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     chips_per_board = 16 # 32 GB per board
     communication_latency = cost_communication(int(n_layers), int(d_model), in_tokens, batch_size, chips_per_board, int(TP), int(PP), False)
     vector_latency = vector_process(int(n_layers), int(d_model), int(n_heads), int(d_head), int(TP), int(PP), in_tokens, out_tokens, batch_size, False)
-    total_cycles += vector_latency + communication_latency
+    total_cycles = max(total_cycles + vector_latency, communication_latency)
     sh['H'+str(2)] = total_cycles
     sh['H'+str(3)] = total_energy
 
@@ -182,6 +182,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
 
     print("Throughput: {:.2f} K tokens/s".format(throughput))
     print("Energy: {:.2f} pJ".format(total_energy) + '\n')
+
     wb.save('result.xlsx')
     return
 
