@@ -6,6 +6,21 @@ We implemented python programs to generate and run the LLM workloads and traces.
 We modified DRAMsim3 simulator to support the custom trace format for HB-NPU and the custom DRAM commands of Local HB and Global HB operations.
 Also we implemented Custom command scheduler that executes BLAS functions for the given LLM workloads by generating HB-NPU DRAM commands and enqueueing them to each channel controller of DRAM.
 
+If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870),:
+```
+@INPROCEEDINGS{11132870,
+  author={Han, Sanghyeok and Yoon, Byungkuk and Park, Gyeonghwan and Song, Choungki and Kim, Dongkyun and Kim, Jae-Joon},
+  booktitle={2025 62nd ACM/IEEE Design Automation Conference (DAC)}, 
+  title={Near-Memory LLM Inference Processor based on 3D DRAM-to-logic Hybrid Bonding}, 
+  year={2025},
+  volume={},
+  number={},
+  pages={1-7},
+  keywords={Three-dimensional displays;Design automation;Large language models;AI accelerators;Computer architecture;Bandwidth;Data transfer;Boosting;Bonding},
+  doi={10.1109/DAC63849.2025.11132870}}
+
+```
+
 ## Building and running the simulator
 
 This simulator has been built based on DRAMsim3.
