@@ -1,4 +1,5 @@
 #include "dram_system.h"
+#include "pim_transaction.h"
 #include <assert.h>
 #include <cmath>
 namespace dramsim3 {
@@ -233,37 +234,22 @@ void JedecDRAMSystem::ProcessPimTransaction() {
     //*** Custom Transaction Queue Manager ***//
     // Pop a PIM transaction if the queue is not empty
     if (!pim_trans_queue_.empty()) {
-        int cut_no;
-        int bw_cutNo = 4;
-        int bw_vcuts = 3;
-        int bw_hcuts = 1;
-        int bw_mcf = 3;
-        int bw_ucf = 3;
-        int bw_df = 1;
-        int bw_Mtile = 4;
-        int bw_kernelSize = 5;
-        int bw_stride = 5;
-        int bw_dimValue = 32;
-        int bw_baseRow = 22;
-        int bw_loadType = 2;
-
         auto it = pim_trans_queue_.begin();
-        uint64_t address = it->addr;
+        DecodedPimTransaction decoded =
+            PimTransactionDecoder::Decode(pim_trans_queue_.front().addr);
 
-        // distinguish transaction by LSB of its address into three types:
-        // launch computation, load dataflow configuration, and load workload configuration
-        if (it->addr & 1) { // launch computation
-            address = address >> 1;
+        switch (decoded.kind) {
+        case PimTransactionKind::START_COMPUTATION: {
             int cuts = vcuts * hcuts;
             bool configured = true;
             for (int i=0; i<cuts; i++)
-                if ((address & (1 << i)) && (M[i] != 0 && N[i] != 0 && K[i] != 0));
+                if ((decoded.launch_mask & (1 << i)) && (M[i] != 0 && N[i] != 0 && K[i] != 0));
                 else {
                     configured = false;
                 }
             if (configured) {
                 for (int i=0; i<cuts; i++)
-                    if(address & (1 << i))
+                    if(decoded.launch_mask & (1 << i))
                         in_pim[i] = true;
                 pim_trans_queue_.erase(it);
             }
@@ -271,10 +257,9 @@ void JedecDRAMSystem::ProcessPimTransaction() {
                 ctrls_[i]->in_pim = true;
             }
 
+            break;
         }
-        else if ((it->addr & (1 << 6)) && (it->addr & (1 << 5))) { // loading dataflow configuration
-
-
+        case PimTransactionKind::LOAD_DATAFLOW_CONFIG: {
             base_rows_w.clear();
             base_rows_in.clear();
             base_rows_out.clear();
@@ -296,18 +281,11 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             out_act_placed.clear();
             output_valid.clear();
 
-            address = address >> 1 >> 4 >> 2; // trans_type, cut_no, loadType
-            vcuts = 1 << (address & ((1<<bw_vcuts)-1));
-            address = address >> bw_vcuts;
-            hcuts = 1 << (address & ((1<<bw_hcuts)-1));
-            address = address >> bw_hcuts;
-            mcf = 1 << (address & ((1<<bw_mcf)-1));
-            address = address >> bw_mcf;
-            ucf = 1 << (address & ((1<<bw_ucf)-1));
-            address = address >> bw_ucf;
-            df = address & ((1<<bw_df)-1);
-            address = address >> bw_df;
-
+            vcuts = decoded.vcuts;
+            hcuts = decoded.hcuts;
+            mcf = decoded.mcf;
+            ucf = decoded.ucf;
+            df = decoded.df;
 
             mc = mcf * ucf;
             if (vcuts * hcuts > 1) // TODO
@@ -315,16 +293,11 @@ void JedecDRAMSystem::ProcessPimTransaction() {
                     ctrls_[i]->wr_multitenant = true;
                 }
 
-            M_tile_size = 1 << (address & ((1<<bw_Mtile)-1));
-            address = address >> bw_Mtile;
-            vcuts_next = 1 << (address & ((1<<bw_vcuts)-1));
-            address = address >> bw_vcuts;
-            hcuts_next = 1 << (address & ((1<<bw_hcuts)-1));
-            address = address >> bw_hcuts;
-            kernel_size = address & ((1<<bw_kernelSize)-1);
-            address = address >> bw_kernelSize;
-            stride = address & ((1<<bw_stride)-1);
-
+            M_tile_size = decoded.m_tile_size;
+            vcuts_next = decoded.vcuts_next;
+            hcuts_next = decoded.hcuts_next;
+            kernel_size = decoded.kernel_size;
+            stride = decoded.stride;
 
             int cuts = vcuts * hcuts;
             base_rows_w.assign(cuts, 0);
@@ -349,30 +322,22 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             output_valid.assign(cuts, 0);
 
             pim_trans_queue_.erase(it);
+            break;
         }
-        else { // loading workload configuration
-            address = address >> 1;
-            cut_no = address & ((1 << bw_cutNo)-1);
-            address = address >> 4;
-            int loadType = address & ((1<<bw_loadType)-1);
-            address = address >> bw_loadType;
-            int dim_value = address & (((uint64_t)1<<bw_dimValue)-1);
-            address = address >> bw_dimValue;
-            uint64_t base_row = address & ((1<<bw_baseRow)-1);
-            address = address >> bw_baseRow;
-            switch(loadType) {
+        case PimTransactionKind::LOAD_WORKLOAD_CONFIG: {
+            switch(decoded.load_type) {
                 case 0: // M, weight
-                    base_rows_w[cut_no] = base_row;
-                    M[cut_no] = dim_value;
+                    base_rows_w[decoded.cut_no] = decoded.base_row;
+                    M[decoded.cut_no] = decoded.dim_value;
                     break;
                 case 1: // K, output
-                    base_rows_out[cut_no] = base_row;
+                    base_rows_out[decoded.cut_no] = decoded.base_row;
                     // std::cout<<base_row<<std::endl;
-                    K[cut_no] = dim_value;
+                    K[decoded.cut_no] = decoded.dim_value;
                     break;
                 case 2: // N, input
-                    base_rows_in[cut_no] = base_row;
-                    N[cut_no] = dim_value;
+                    base_rows_in[decoded.cut_no] = decoded.base_row;
+                    N[decoded.cut_no] = decoded.dim_value;
                     break;
                 default:
                     std::cerr << "Invalid load type!"
@@ -381,7 +346,8 @@ void JedecDRAMSystem::ProcessPimTransaction() {
                     break;
             }
             pim_trans_queue_.erase(it);
-
+            break;
+        }
         }
     }
 

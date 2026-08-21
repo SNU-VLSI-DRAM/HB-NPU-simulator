@@ -39,6 +39,7 @@ add_library(dramsim3 SHARED
     src/simple_stats.cc
     src/timing.cc
     src/memory_system.cc
+    src/pim_transaction.cc
 )
 
 if (THERMAL)
@@ -104,6 +105,7 @@ add_executable(dramsim3test EXCLUDE_FROM_ALL
     tests/test_config.cc
     tests/test_dramsys.cc
     tests/test_hmcsys.cc # IDK somehow this can literally crush your computer
+    tests/test_pim.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)
