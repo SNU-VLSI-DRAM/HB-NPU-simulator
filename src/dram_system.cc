@@ -343,8 +343,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
 
         int weight_banks_reduce = pim_config_.df==0? 8:16; // Bank Interleaving option for weight loading
-        std::vector<std::vector<Command>> in_cmds(cuts);
-        std::vector<std::vector<Command>> w_cmds(cuts);
+        PimCommandBatch batch;
 
         bool output_ready = partition.iw_status == 3;
 
@@ -380,26 +379,26 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
                         // This is to prevent the commands from being sent multiple times.
                         if (!ready_cmd.IsValid()) {
-                            w_cmds[i].clear();
+                            batch.ClearWeight();
                             break;
                         }
                         else {
-                            w_cmds[i].push_back(ready_cmd);
-                            if (w_cmds[i].begin()->cmd_type != ready_cmd.cmd_type) {
-                                w_cmds[i].clear();
+                            batch.AddWeight(ready_cmd);
+                            if (batch.weight_commands.begin()->cmd_type != ready_cmd.cmd_type) {
+                                batch.ClearWeight();
                                 break;
                             }
                         }
                     }
-                    if (w_cmds[i].empty()) break;
+                    if (batch.weight_commands.empty()) break;
                 }
 
 
-                if (w_cmds[i].empty()) break;
+                if (batch.weight_commands.empty()) break;
                 // Check if the activation command was already sent.
-                if (w_cmds[i].begin()->cmd_type == act_type) {
+                if (batch.weight_commands.begin()->cmd_type == act_type) {
                     if (partition.weight_act_placed || wait_refresh) {
-                        w_cmds[i].clear();
+                        batch.ClearWeight();
                         break;
                     }
                     else
@@ -407,10 +406,10 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                 }
                 //
                 else {
-                    if (w_cmds[i].begin()->cmd_type == readp_type) {
+                    if (batch.weight_commands.begin()->cmd_type == readp_type) {
                         partition.weight_act_placed = false;
                     }
-                    if (pim_config_.df == 1 && w_cmds[i].begin()->cmd_type == CommandType::PRECHARGE) {
+                    if (pim_config_.df == 1 && batch.weight_commands.begin()->cmd_type == CommandType::PRECHARGE) {
                         break;
                     }
 
@@ -475,15 +474,15 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
                         // This is to prevent the commands from being sent multiple times.
                         if (!ready_cmd.IsValid()) {
-                            in_cmds[i].clear();
+                            batch.ClearInput();
                             break;
                         }
                         else {
-                            in_cmds[i].push_back(ready_cmd);
-                            if (in_cmds[i].begin()->cmd_type != ready_cmd.cmd_type) {
+                            batch.AddInput(ready_cmd, clk_);
+                            if (batch.input_commands.begin()->cmd_type != ready_cmd.cmd_type) {
                                 if (mixed) {
-                                    if (mixed_cmd.cmd_type != in_cmds[i].begin()->cmd_type && mixed_cmd.cmd_type != ready_cmd.cmd_type) {
-                                        std::cout<<"3 ops mixed: "<<mixed_cmd<<*in_cmds[i].begin()<<ready_cmd<<std::endl;
+                                    if (mixed_cmd.cmd_type != batch.input_commands.begin()->cmd_type && mixed_cmd.cmd_type != ready_cmd.cmd_type) {
+                                        std::cout<<"3 ops mixed: "<<mixed_cmd<<*batch.input_commands.begin()<<ready_cmd<<std::endl;
                                     }
                                 }
                                 else {
@@ -495,26 +494,30 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         }
                     }
                 }
-                if(cuts > 1 && in_cmds[i].size() != cut_height) {
-                    in_cmds[i].clear();
+                if(cuts > 1 && batch.input_commands.size() != cut_height) {
+                    batch.ClearInput();
                     break;
                 }
                 if (mixed) {
-                    for (auto it = in_cmds[i].begin(); it != in_cmds[i].end();) {
+                    size_t input_index = 0;
+                    for (auto it = batch.input_commands.begin(); it != batch.input_commands.end();) {
                         if (it->cmd_type == read_type || it->cmd_type == readp_type) {
-                            it = in_cmds[i].erase(it);
+                            it = batch.input_commands.erase(it);
+                            batch.input_release_times.erase(batch.input_release_times.begin() + input_index);
                         }
-                        else
+                        else {
                             it++;
+                            input_index++;
+                        }
                     }
                 }
 
-                if (in_cmds[i].empty()) break;
+                if (batch.input_commands.empty()) break;
 
                 // Check if the activation command was already sent.
-                if (in_cmds[i].begin()->cmd_type == act_type) {
+                if (batch.input_commands.begin()->cmd_type == act_type) {
                     if ((partition.in_act_placed) || wait_refresh) {
-                        in_cmds[i].clear();
+                        batch.ClearInput();
                         break;
                     }
                     else{
@@ -524,11 +527,11 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                 }
                 else {
 
-                    if (in_cmds[i].begin()->cmd_type == readp_type) {
+                    if (batch.input_commands.begin()->cmd_type == readp_type) {
                         partition.in_act_placed = false;
                     }
                     if (partition.vpu_cnt!=0){
-                        in_cmds[i].clear();
+                        batch.ClearInput();
                         break;
                     }
 
@@ -590,9 +593,6 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
         if (partition.out_cnt != -1) partition.out_cnt--;
 
 
-        std::vector<std::vector<Command>> out_cmds(cuts);
-
-
         // Writing Output from NPU to DRAM
         // Command Scheduler lookups the NPU status to check if the output data is ready to be sent to DRAM.
         bool out_enable = cut_height / pim_config_.vcuts > 0 || vcut_no % 2 == 0;
@@ -636,32 +636,32 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                     // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
                     // This is to prevent the commands from being sent multiple times.
                     if (!ready_cmd.IsValid()) {
-                        out_cmds[i].clear();
+                        batch.ClearOutput();
                         break;
                     }
                     else {
-                        out_cmds[i].push_back(ready_cmd);
-                        if (out_cmds[i].begin()->cmd_type != ready_cmd.cmd_type) {
-                            out_cmds[i].clear();
+                        batch.AddOutput(ready_cmd);
+                        if (batch.output_commands.begin()->cmd_type != ready_cmd.cmd_type) {
+                            batch.ClearOutput();
                             break;
                         }
                     }
                 }
-                if (out_cmds[i].empty()) break;
+                if (batch.output_commands.empty()) break;
             }
 
             // Check if the activation command was already sent.
-            if (!out_cmds[i].empty()) {
-                if (out_cmds[i].begin()->cmd_type == CommandType::PIM_ACTIVATE) {
+            if (!batch.output_commands.empty()) {
+                if (batch.output_commands.begin()->cmd_type == CommandType::PIM_ACTIVATE) {
                     if (partition.output_act_placed || wait_refresh) {
-                        out_cmds[i].clear();
+                        batch.ClearOutput();
                     }
                     else {
                         partition.output_act_placed = true;
                     }
                 }
                 else {
-                    if (out_cmds[i].begin()->cmd_type == CommandType::PIM_WRITE_PRECHARGE) {
+                    if (batch.output_commands.begin()->cmd_type == CommandType::PIM_WRITE_PRECHARGE) {
                         partition.output_act_placed = false;
                     }
 
@@ -699,7 +699,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
         }
 
         // Finally the scheduler sends the aggregated commands to channel controllers by pushing them into custom command queues, which are managed in-order.
-        DispatchCommands(w_cmds, in_cmds, out_cmds);
+        DispatchCommands(batch);
 
     }
 
@@ -708,28 +708,18 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
 }
 
-void JedecDRAMSystem::DispatchCommands(
-    const std::vector<std::vector<Command>>& weight_commands,
-    const std::vector<std::vector<Command>>& input_commands,
-    const std::vector<std::vector<Command>>& output_commands) {
-    for (auto& it: weight_commands) {
-        for (auto& it2: it) {
-           // std::cout<<clk_<<" "<<it<<std::endl;
-            ctrls_[it2.Channel()]->rd_w_cmds_.push_back(it2);
-        }
+void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
+    for (auto& command: batch.weight_commands) {
+       // std::cout<<clk_<<" "<<command<<std::endl;
+        ctrls_[command.Channel()]->rd_w_cmds_.push_back(command);
     }
-    for (auto& it: input_commands) {
-        for (auto& it2: it) {
-            ctrls_[it2.Channel()]->rd_in_cmds_.push_back(it2);
-            int release_time_ = clk_;
-            if (it2.cmd_type == CommandType::PIM_ACTIVATE) release_time_ += 0;  // + (it.Channel() % cut_height)*config_.tCCD_S);
-            ctrls_[it2.Channel()]->release_time.push_back(release_time_);
-        }
+    for (size_t i = 0; i < batch.input_commands.size(); i++) {
+        const Command& command = batch.input_commands[i];
+        ctrls_[command.Channel()]->rd_in_cmds_.push_back(command);
+        ctrls_[command.Channel()]->release_time.push_back(batch.input_release_times[i]);
     }
-    for (auto& it: output_commands) {
-        for (auto& it2: it) {
-            ctrls_[it2.Channel()]->wr_cmds_.push_back(it2);
-        }
+    for (auto& command: batch.output_commands) {
+        ctrls_[command.Channel()]->wr_cmds_.push_back(command);
     }
 }
 

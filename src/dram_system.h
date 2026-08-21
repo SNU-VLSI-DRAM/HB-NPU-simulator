@@ -8,6 +8,7 @@
 #include "common.h"
 #include "configuration.h"
 #include "controller.h"
+#include "pim_command_batch.h"
 #include "pim_config.h"
 #include "pim_partition_state.h"
 #include "timing.h"
@@ -83,10 +84,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     void ProcessPimTransaction();
     bool PimCommandsBlockedByRefresh() const;
     void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
-    void DispatchCommands(
-        const std::vector<std::vector<Command>>& weight_commands,
-        const std::vector<std::vector<Command>>& input_commands,
-        const std::vector<std::vector<Command>>& output_commands);
+    void DispatchCommands(const PimCommandBatch& batch);
     void TickControllers();
     PimDataflowConfig pim_config_;
 

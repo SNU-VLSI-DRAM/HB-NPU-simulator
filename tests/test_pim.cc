@@ -1,7 +1,21 @@
 #include "catch.hpp"
+#include "pim_command_batch.h"
 #include "pim_config.h"
 #include "pim_partition_state.h"
 #include "pim_transaction.h"
+
+TEST_CASE("PIM command batch preserves order and release pairing", "[pim]") {
+    using namespace dramsim3;
+    PimCommandBatch batch;
+    Command first(CommandType::PIM_ACTIVATE, Address(0, 0, 0, 0, 1, 2), 3);
+    Command second(CommandType::LH_READ, Address(1, 0, 0, 1, 4, 5), 6);
+    batch.AddInput(first, 10);
+    batch.AddInput(second, 11);
+    REQUIRE(batch.input_commands.size() == 2);
+    REQUIRE(batch.input_commands[0].hex_addr == 3);
+    REQUIRE(batch.input_commands[1].hex_addr == 6);
+    REQUIRE(batch.input_release_times == std::vector<int>{10, 11});
+}
 
 TEST_CASE("PIM partition state defaults are independent", "[pim]") {
     using namespace dramsim3;
