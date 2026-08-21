@@ -9,6 +9,7 @@
 #include "configuration.h"
 #include "controller.h"
 #include "pim_config.h"
+#include "pim_partition_state.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -90,29 +91,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     PimDataflowConfig pim_config_;
 
    public:
-    // workload configuration
-    std::vector<uint64_t> base_rows_in;
-    std::vector<uint64_t> base_rows_w;
-    std::vector<uint64_t> base_rows_out;
-    std::vector<int> M;
-    std::vector<int> N;
-    std::vector<int> K;
-    // BLAS scheduler status
-    std::vector<int> M_it;
-    std::vector<int> N_it;
-    std::vector<int> K_tile_it;
-    std::vector<int> M_out_it;
-    std::vector<int> N_out_tile_it;
-    std::vector<bool> in_pim;
-    std::vector<int> iw_status;
-    std::vector<bool> in_act_placed;
-    std::vector<bool> w_act_placed;
-    std::vector<bool> out_act_placed;
-    // NPU status
-    std::vector<int> output_valid;
-    std::vector<int> in_cnt;
-    std::vector<int> out_cnt;
-    std::vector<int> vpu_cnt;
+    std::vector<PimPartitionState> partitions_;
 
 
     std::vector<std::vector<bool>> bank_occupancy_;

@@ -1,6 +1,20 @@
 #include "catch.hpp"
 #include "pim_config.h"
+#include "pim_partition_state.h"
 #include "pim_transaction.h"
+
+TEST_CASE("PIM partition state defaults are independent", "[pim]") {
+    using namespace dramsim3;
+    std::vector<PimPartitionState> partitions(2);
+    REQUIRE(partitions[0].base_row_in == 0);
+    REQUIRE(partitions[0].m == 0);
+    REQUIRE(partitions[0].in_pim == false);
+    REQUIRE(partitions[0].out_cnt == -1);
+    partitions[0].m = 17;
+    partitions[0].in_act_placed = true;
+    REQUIRE(partitions[1].m == 0);
+    REQUIRE(partitions[1].in_act_placed == false);
+}
 
 TEST_CASE("PIM dataflow config preserves defaults and decoded values", "[pim]") {
     using namespace dramsim3;

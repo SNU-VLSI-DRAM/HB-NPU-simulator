@@ -218,9 +218,9 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
         if (ctrls_[i]->pim_refresh_coming() && pim_config_.vcuts != -1 && pim_config_.hcuts != -1) {
             wait_refresh = true;
             for (int j=0; j<pim_config_.vcuts*pim_config_.hcuts; j++) {
-                in_act_placed[j] = false;
-                w_act_placed[j] = false;
-                out_act_placed[j] = false;
+                partitions_[j].in_act_placed = false;
+                partitions_[j].weight_act_placed = false;
+                partitions_[j].output_act_placed = false;
             }
             // std::cout<<clk_ << "\tWait Refresh\n";
         }
@@ -242,15 +242,19 @@ void JedecDRAMSystem::ProcessPimTransaction() {
         case PimTransactionKind::START_COMPUTATION: {
             int cuts = pim_config_.vcuts * pim_config_.hcuts;
             bool configured = true;
-            for (int i=0; i<cuts; i++)
-                if ((decoded.launch_mask & (1 << i)) && (M[i] != 0 && N[i] != 0 && K[i] != 0));
+            for (int i=0; i<cuts; i++) {
+                PimPartitionState& partition = partitions_[i];
+                if ((decoded.launch_mask & (1 << i)) && (partition.m != 0 && partition.n != 0 && partition.k != 0));
                 else {
                     configured = false;
                 }
+            }
             if (configured) {
-                for (int i=0; i<cuts; i++)
+                for (int i=0; i<cuts; i++) {
+                    PimPartitionState& partition = partitions_[i];
                     if(decoded.launch_mask & (1 << i))
-                        in_pim[i] = true;
+                        partition.in_pim = true;
+                }
                 pim_trans_queue_.erase(it);
             }
             for (size_t i=0; i<ctrls_.size(); i++) {
@@ -260,26 +264,7 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             break;
         }
         case PimTransactionKind::LOAD_DATAFLOW_CONFIG: {
-            base_rows_w.clear();
-            base_rows_in.clear();
-            base_rows_out.clear();
-            M.clear();
-            N.clear();
-            K.clear();
-            M_it.clear();
-            K_tile_it.clear();
-            N_it.clear();
-            M_out_it.clear();
-            N_out_tile_it.clear();
-            in_pim.clear();
-            iw_status.clear();
-            in_cnt.clear();
-            out_cnt.clear();
-            vpu_cnt.clear();
-            in_act_placed.clear();
-            w_act_placed.clear();
-            out_act_placed.clear();
-            output_valid.clear();
+            partitions_.clear();
 
             pim_config_.LoadLayout(decoded);
             if (pim_config_.vcuts * pim_config_.hcuts > 1) // TODO
@@ -290,44 +275,26 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             pim_config_.LoadTiling(decoded);
 
             int cuts = pim_config_.vcuts * pim_config_.hcuts;
-            base_rows_w.assign(cuts, 0);
-            base_rows_in.assign(cuts, 0);
-            base_rows_out.assign(cuts, 0);
-            M.assign(cuts, 0);
-            N.assign(cuts, 0);
-            K.assign(cuts, 0);
-            M_it.assign(cuts, 0);
-            K_tile_it.assign(cuts, 0);
-            N_it.assign(cuts, 0);
-            M_out_it.assign(cuts, 0);
-            N_out_tile_it.assign(cuts, 0);
-            in_pim.assign(cuts, false);
-            iw_status.assign(cuts, 0);
-            in_cnt.assign(cuts, 0);
-            out_cnt.assign(cuts, -1);
-            vpu_cnt.assign(cuts, 0);
-            in_act_placed.assign(cuts, false);
-            w_act_placed.assign(cuts, false);
-            out_act_placed.assign(cuts, false);
-            output_valid.assign(cuts, 0);
+            partitions_.assign(cuts, PimPartitionState());
 
             pim_trans_queue_.erase(it);
             break;
         }
         case PimTransactionKind::LOAD_WORKLOAD_CONFIG: {
+            PimPartitionState& partition = partitions_[decoded.cut_no];
             switch(decoded.load_type) {
                 case 0: // M, weight
-                    base_rows_w[decoded.cut_no] = decoded.base_row;
-                    M[decoded.cut_no] = decoded.dim_value;
+                    partition.base_row_weight = decoded.base_row;
+                    partition.m = decoded.dim_value;
                     break;
                 case 1: // K, output
-                    base_rows_out[decoded.cut_no] = decoded.base_row;
+                    partition.base_row_output = decoded.base_row;
                     // std::cout<<base_row<<std::endl;
-                    K[decoded.cut_no] = decoded.dim_value;
+                    partition.k = decoded.dim_value;
                     break;
                 case 2: // N, input
-                    base_rows_in[decoded.cut_no] = decoded.base_row;
-                    N[decoded.cut_no] = decoded.dim_value;
+                    partition.base_row_in = decoded.base_row;
+                    partition.n = decoded.dim_value;
                     break;
                 default:
                     std::cerr << "Invalid load type!"
@@ -360,7 +327,8 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
     int cuts = 0;
     if (pim_config_.vcuts != -1 && pim_config_.hcuts != -1) cuts = pim_config_.vcuts * pim_config_.hcuts;
     for (int i=0; i < cuts; i++) {
-        if (!in_pim[i] || is_in_ref) continue;
+        PimPartitionState& partition = partitions_[i];
+        if (!partition.in_pim || is_in_ref) continue;
 
         int vcut_no = i % pim_config_.vcuts;
         int cut_height = config_.channels / pim_config_.hcuts;
@@ -368,30 +336,30 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
         int cut_width = config_.banks / pim_config_.vcuts;
 
         int N_tile_size = 128 / pim_config_.vcuts; // 128 : the number of PEs in a row
-        int N_tile_it = N_it[i] / N_tile_size;
-        int M_tile_it = M_it[i] / pim_config_.m_tile_size;
-        int M_current_tile_size = M[i] < pim_config_.m_tile_size * (M_tile_it + 1) ? M[i] % pim_config_.m_tile_size : pim_config_.m_tile_size;
-        int K_tile_size = std::min(cut_height * 16, K[i]); // 16: the number of PEs supported by a bank's io
+        int N_tile_it = partition.n_it / N_tile_size;
+        int M_tile_it = partition.m_it / pim_config_.m_tile_size;
+        int M_current_tile_size = partition.m < pim_config_.m_tile_size * (M_tile_it + 1) ? partition.m % pim_config_.m_tile_size : pim_config_.m_tile_size;
+        int K_tile_size = std::min(cut_height * 16, partition.k); // 16: the number of PEs supported by a bank's io
 
 
         int weight_banks_reduce = pim_config_.df==0? 8:16; // Bank Interleaving option for weight loading
         std::vector<std::vector<Command>> in_cmds(cuts);
         std::vector<std::vector<Command>> w_cmds(cuts);
 
-        bool output_ready = iw_status[i] == 3;
+        bool output_ready = partition.iw_status == 3;
 
-        // std::cout<<iw_status[i]<<"iw_status\n";
+        // std::cout<<partition.iw_status<<"iw_status\n";
         // Our custom command scheduler changes iw_status value to switch the BLAS functions between loading data into PE array registers and streaming data into the array.
         // It manages matrix multiplication progress by monitoring and updating the BLAS status and NPU status
-        switch (iw_status[i]) {
+        switch (partition.iw_status) {
             case 0: { // data loading into PE registers
                 CommandType act_type = CommandType::PIM_ACTIVATE;
                 CommandType read_type = CommandType::GH_READ;
                 CommandType readp_type = CommandType::GH_READ_PRECHARGE;
 
 
-                int N_tile_size_per_bank = std::min(N[i], (N_tile_size-1)/(cut_width/weight_banks_reduce) + 1);
-                int col_offset = N_tile_it * (N_tile_size_per_bank * ((K[i]-1) / K_tile_size + 1)) + K_tile_it[i] * N_tile_size_per_bank + N_it[i] % N_tile_size; // N_it incremented by N_tile_size when N_it % N_tile_size_per_bank == 0 (but not with N_tile_size)
+                int N_tile_size_per_bank = std::min(partition.n, (N_tile_size-1)/(cut_width/weight_banks_reduce) + 1);
+                int col_offset = N_tile_it * (N_tile_size_per_bank * ((partition.k-1) / K_tile_size + 1)) + partition.k_tile_it * N_tile_size_per_bank + partition.n_it % N_tile_size; // n_it incremented by N_tile_size when n_it % N_tile_size_per_bank == 0 (but not with N_tile_size)
                 // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
                 for (int j=0; j<cut_height; j++) {
                     // It can read multiple banks for bank interleaving or only one bank per channel
@@ -401,12 +369,12 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         int bg = bk / config_.banks_per_group;
                         bk = bk % config_.banks_per_group;
                         // building memory address by combining base physical address and BLAS configuration
-                        Address addr = Address(ch, 0, bg, bk, base_rows_w[i] + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
+                        Address addr = Address(ch, 0, bg, bk, partition.base_row_weight + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
                         uint64_t hex_addr = config_.AddressUnmapping(addr);
                         // generate read-precharge command if this is the last access to read the tile.
                         CommandType cmd_type;
-                        bool exit = ((N_it[i]+1) % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || (N_it[i]+1) % N_tile_size != 0));
-                        cmd_type = (addr.column + 1) % std::min(N[i], 128 / config_.banks * weight_banks_reduce) == 0 || (addr.column + 1) % (config_.columns / config_.BL) == 0 || exit ? readp_type : read_type;
+                        bool exit = ((partition.n_it+1) % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || (partition.n_it+1) % N_tile_size != 0));
+                        cmd_type = (addr.column + 1) % std::min(partition.n, 128 / config_.banks * weight_banks_reduce) == 0 || (addr.column + 1) % (config_.columns / config_.BL) == 0 || exit ? readp_type : read_type;
                         Command cmd = Command(cmd_type, addr, hex_addr);
                         Command ready_cmd = ctrls_[ch]->GetReadyCommand(cmd, clk_);
                         // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
@@ -430,27 +398,27 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                 if (w_cmds[i].empty()) break;
                 // Check if the activation command was already sent.
                 if (w_cmds[i].begin()->cmd_type == act_type) {
-                    if (w_act_placed[i] || wait_refresh) {
+                    if (partition.weight_act_placed || wait_refresh) {
                         w_cmds[i].clear();
                         break;
                     }
                     else
-                        w_act_placed[i] = true;
+                        partition.weight_act_placed = true;
                 }
                 //
                 else {
                     if (w_cmds[i].begin()->cmd_type == readp_type) {
-                        w_act_placed[i] = false;
+                        partition.weight_act_placed = false;
                     }
                     if (pim_config_.df == 1 && w_cmds[i].begin()->cmd_type == CommandType::PRECHARGE) {
                         break;
                     }
 
                     // increment BLAS iterators
-                    N_it[i]++;
-                    if (N_it[i] % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || N_it[i] % N_tile_size != 0)) {
-                        N_it[i] = N_tile_size * N_tile_it;
-                        iw_status[i]++;
+                    partition.n_it++;
+                    if (partition.n_it % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || partition.n_it % N_tile_size != 0)) {
+                        partition.n_it = N_tile_size * N_tile_it;
+                        partition.iw_status++;
                     }
                 }
 
@@ -460,12 +428,12 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
             case 1: { // Finished data loading
                 // wait npu signals
                 // For non-multi-tenant cases, advance to next stage immediately.
-                iw_status[i]++;
-                vpu_cnt[i] = 1;
-                if (cuts == 1) { //N[i]==1) { //TODO support for MT
-                    for (int j=0; j<iw_status.size(); j++) {
-                        if (iw_status[j] == 0 || iw_status[j] == 3) {
-                            iw_status[i]--;
+                partition.iw_status++;
+                partition.vpu_cnt = 1;
+                if (cuts == 1) { //partition.n==1) { //TODO support for MT
+                    for (int j=0; j<partitions_.size(); j++) {
+                        if (partitions_[j].iw_status == 0 || partitions_[j].iw_status == 3) {
+                            partition.iw_status--;
                             break;
                         }
                     }
@@ -477,10 +445,10 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                 // Weight stationary dataflow opts to use Global HB, while TS-GEMM/GEMV dataflow uses Local HB.
                 CommandType read_type = pim_config_.df == 0 ? CommandType::GH_READ : CommandType::LH_READ;
                 CommandType readp_type = pim_config_.df == 0 ? CommandType::GH_READ_PRECHARGE : CommandType::LH_READ_PRECHARGE;
-                vpu_cnt[i]--;
-                vpu_cnt[i] = std::max(0, vpu_cnt[i]);
+                partition.vpu_cnt--;
+                partition.vpu_cnt = std::max(0, partition.vpu_cnt);
 
-                int col_offset = M_tile_it * (pim_config_.m_tile_size * ((K[i]-1) / K_tile_size + 1)) + K_tile_it[i] * M_current_tile_size + M_it[i] % pim_config_.m_tile_size;
+                int col_offset = M_tile_it * (pim_config_.m_tile_size * ((partition.k-1) / K_tile_size + 1)) + partition.k_tile_it * M_current_tile_size + partition.m_it % pim_config_.m_tile_size;
                 bool mixed = false;
                 Command mixed_cmd;
                 // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
@@ -495,10 +463,10 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         bk = bk % config_.banks_per_group;
 
                         // building memory address by combining base physical address and BLAS configuration
-                        Address addr = Address(ch, 0, bg, bk, base_rows_in[i] + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
+                        Address addr = Address(ch, 0, bg, bk, partition.base_row_in + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
                         uint64_t hex_addr = config_.AddressUnmapping(addr);
-                        bool close = M_it[i] + 1 == M[i]; // prevent closing between tiles
-                        bool close2 = (K_tile_it[i]+1) * K_tile_size >= K[i]; // leave open in WS since batch size is too small in LLMs
+                        bool close = partition.m_it + 1 == partition.m; // prevent closing between tiles
+                        bool close2 = (partition.k_tile_it+1) * K_tile_size >= partition.k; // leave open in WS since batch size is too small in LLMs
                         bool close3 = pim_config_.df==0?close2 && close:close;
                         // generate read-precharge command if this is the last access to read the tile.
                         CommandType cmd_type = close3 || addr.column == config_.columns / config_.BL - 1 ? readp_type : read_type;
@@ -545,21 +513,21 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
                 // Check if the activation command was already sent.
                 if (in_cmds[i].begin()->cmd_type == act_type) {
-                    if ((in_act_placed[i]) || wait_refresh) {
+                    if ((partition.in_act_placed) || wait_refresh) {
                         in_cmds[i].clear();
                         break;
                     }
                     else{
-                        in_act_placed[i] = true;
+                        partition.in_act_placed = true;
 
                     }
                 }
                 else {
 
                     if (in_cmds[i].begin()->cmd_type == readp_type) {
-                        in_act_placed[i] = false;
+                        partition.in_act_placed = false;
                     }
-                    if (vpu_cnt[i]!=0){
+                    if (partition.vpu_cnt!=0){
                         in_cmds[i].clear();
                         break;
                     }
@@ -567,29 +535,29 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                     assert(pim_config_.m_tile_size > 128/pim_config_.vcuts);
 
                     // Update NPU status. Countdown the operation delay.
-                    if ((K_tile_it[i]+1) * K_tile_size >= K[i] && M_it[i] % pim_config_.m_tile_size == 0) {
-                        out_cnt[i] = std::max(1, config_.tCCD_L * (3 + 16) - config_.tRCDWR);
+                    if ((partition.k_tile_it+1) * K_tile_size >= partition.k && partition.m_it % pim_config_.m_tile_size == 0) {
+                        partition.out_cnt = std::max(1, config_.tCCD_L * (3 + 16) - config_.tRCDWR);
                     }
 
 
                     // Increment Iterators
-                    M_it[i]++;
-                    if (M_it[i] % pim_config_.m_tile_size == 0 || M_it[i] == M[i]) {
-                        in_cnt[i] = std::max(1, config_.tCCD_L * std::max(128/(pim_config_.vcuts*pim_config_.mc), 16) - config_.tRCDRD);
-                        iw_status[i]++;
-                        M_it[i] = pim_config_.m_tile_size * M_tile_it;
-                        K_tile_it[i]++;
+                    partition.m_it++;
+                    if (partition.m_it % pim_config_.m_tile_size == 0 || partition.m_it == partition.m) {
+                        partition.in_cnt = std::max(1, config_.tCCD_L * std::max(128/(pim_config_.vcuts*pim_config_.mc), 16) - config_.tRCDRD);
+                        partition.iw_status++;
+                        partition.m_it = pim_config_.m_tile_size * M_tile_it;
+                        partition.k_tile_it++;
 
-                        if (K_tile_it[i] * K_tile_size >= K[i]) {
-                            // out_cnt[i] = 3;
-                            K_tile_it[i] = 0;
-                            N_it[i] = N_tile_size * (N_tile_it+1);
-                            if (N_it[i] >= N[i]) {
-                                N_it[i] = 0;
-                                M_it[i] = pim_config_.m_tile_size * (M_tile_it + 1);
-                                if (M_it[i] >= M[i]) {
+                        if (partition.k_tile_it * K_tile_size >= partition.k) {
+                            // partition.out_cnt = 3;
+                            partition.k_tile_it = 0;
+                            partition.n_it = N_tile_size * (N_tile_it+1);
+                            if (partition.n_it >= partition.n) {
+                                partition.n_it = 0;
+                                partition.m_it = pim_config_.m_tile_size * (M_tile_it + 1);
+                                if (partition.m_it >= partition.m) {
                                     std::cout<<clk_<<" End of Computation "<<i<<std::endl;
-                                    in_cnt[i] = -1;
+                                    partition.in_cnt = -1;
                                 }
                             }
                         }
@@ -600,12 +568,12 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
             case 3: {// Finished input
                 // Lookup NPU status
                 // Wait until PE array is available for loading a new tile.
-                if (in_cnt[i] == -1) break;
+                if (partition.in_cnt == -1) break;
                 else {
 
-                    in_cnt[i] = std::max(0, in_cnt[i] - 1);
-                    if (in_cnt[i] == 0 && output_valid[i] == 0)
-                        iw_status[i] = 0;
+                    partition.in_cnt = std::max(0, partition.in_cnt - 1);
+                    if (partition.in_cnt == 0 && partition.output_valid == 0)
+                        partition.iw_status = 0;
                     break;
                 }
                 break;
@@ -618,8 +586,8 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
 
         // Update NPU status
-        if (out_cnt[i] == 0) output_valid[i]++;
-        if (out_cnt[i] != -1) out_cnt[i]--;
+        if (partition.out_cnt == 0) partition.output_valid++;
+        if (partition.out_cnt != -1) partition.out_cnt--;
 
 
         std::vector<std::vector<Command>> out_cmds(cuts);
@@ -628,19 +596,19 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
         // Writing Output from NPU to DRAM
         // Command Scheduler lookups the NPU status to check if the output data is ready to be sent to DRAM.
         bool out_enable = cut_height / pim_config_.vcuts > 0 || vcut_no % 2 == 0;
-        if (output_valid[i] > 0 && output_ready && out_enable) {
-            int vcut_out_no = M[i] == 1 ? vcut_no : pim_config_.vcuts == 16 ? vcut_no / 2 : (vcut_no + N_out_tile_it[i]) % pim_config_.vcuts; // relates to channel number
+        if (partition.output_valid > 0 && output_ready && out_enable) {
+            int vcut_out_no = partition.m == 1 ? vcut_no : pim_config_.vcuts == 16 ? vcut_no / 2 : (vcut_no + partition.n_out_tile_it) % pim_config_.vcuts; // relates to channel number
             int M_tile_size_out = pim_config_.df == 1 ? (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
-            int M_out_tile_it = M_out_it[i] / M_tile_size_out;
-            int M_out = pim_config_.df == 1 ? std::max(1, M[i]*pim_config_.mcf / 128) : M[i];
+            int M_out_tile_it = partition.m_out_it / M_tile_size_out;
+            int M_out = pim_config_.df == 1 ? std::max(1, partition.m*pim_config_.mcf / 128) : partition.m;
             int M_out_current_tile_size = M_out < M_tile_size_out * (M_out_tile_it + 1) ? M_out % M_tile_size_out : M_tile_size_out;
-            int N_out = pim_config_.df == 1 ? 128 : N[i];
+            int N_out = pim_config_.df == 1 ? 128 : partition.n;
             int N_tile_size_out = pim_config_.df == 1 ? 128 : N_tile_size;
-            int N_tile_num = (N[i]-1) / N_tile_size_out + 1;
+            int N_tile_num = (partition.n-1) / N_tile_size_out + 1;
             int N_tile_num_ch = (N_tile_num) / pim_config_.vcuts; // varies by channels to be accessed
-            N_tile_num_ch += N_tile_num % pim_config_.vcuts > N_out_tile_it[i] % pim_config_.vcuts ? 1 : 0;
-            int N_tile_it_ch = N_out_tile_it[i] / pim_config_.vcuts;
-            int col_offset = M_out_tile_it * (M_tile_size_out * N_tile_num_ch) + N_tile_it_ch * M_out_current_tile_size + M_out_it[i] % M_tile_size_out;
+            N_tile_num_ch += N_tile_num % pim_config_.vcuts > partition.n_out_tile_it % pim_config_.vcuts ? 1 : 0;
+            int N_tile_it_ch = partition.n_out_tile_it / pim_config_.vcuts;
+            int col_offset = M_out_tile_it * (M_tile_size_out * N_tile_num_ch) + N_tile_it_ch * M_out_current_tile_size + partition.m_out_it % M_tile_size_out;
 
             // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
             int cut_height_out = cut_height < pim_config_.vcuts ? 1 : cut_height / pim_config_.vcuts;
@@ -648,7 +616,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
                 // It can generate commands for multiple banks per channel simultaneously depending for bank interleaving.
                 int ch = hcut_no * cut_height + vcut_out_no * cut_height_out + j;
-                int k_bound = pim_config_.df == 1 ? 1 : M[i] == 1 || true ? pim_config_.mc : 1;
+                int k_bound = pim_config_.df == 1 ? 1 : partition.m == 1 || true ? pim_config_.mc : 1;
                 for (int k=0; k<k_bound; k++) {
                     int bk = vcut_no * cut_width + k*(cut_width/pim_config_.mc);
                     if (pim_config_.df != 1) bk++;
@@ -656,11 +624,11 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                     bk = bk % config_.banks_per_group;
                     if (pim_config_.df==0) bk += 2;
                     // building memory address by combining base physical address and BLAS configuration
-                    Address addr = Address(ch, 0, bg, bk, base_rows_out[i] + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
-                    // Address addr = Address(ch, 0, bg, bk, base_rows_out[i] + col_offset,  col_offset % (config_.columns/config_.BL));
+                    Address addr = Address(ch, 0, bg, bk, partition.base_row_output + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
+                    // Address addr = Address(ch, 0, bg, bk, partition.base_row_output + col_offset,  col_offset % (config_.columns/config_.BL));
                     uint64_t hex_addr = config_.AddressUnmapping(addr);
                     // generate write-precharge command if this is the last access to write the output tile.
-                    bool close = M_out_it[i] + 1 == M_out;
+                    bool close = partition.m_out_it + 1 == M_out;
                     CommandType cmd_type = close || addr.column == config_.columns / config_.BL - 1 ? CommandType::PIM_WRITE_PRECHARGE : CommandType::PIM_WRITE;
                     Command cmd = Command(cmd_type, addr, hex_addr);
                     Command ready_cmd = ctrls_[ch]->GetReadyCommand(cmd, clk_);
@@ -685,34 +653,34 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
             // Check if the activation command was already sent.
             if (!out_cmds[i].empty()) {
                 if (out_cmds[i].begin()->cmd_type == CommandType::PIM_ACTIVATE) {
-                    if (out_act_placed[i] || wait_refresh) {
+                    if (partition.output_act_placed || wait_refresh) {
                         out_cmds[i].clear();
                     }
                     else {
-                        out_act_placed[i] = true;
+                        partition.output_act_placed = true;
                     }
                 }
                 else {
                     if (out_cmds[i].begin()->cmd_type == CommandType::PIM_WRITE_PRECHARGE) {
-                        out_act_placed[i] = false;
+                        partition.output_act_placed = false;
                     }
 
                     // Increment Iterators
-                    M_out_it[i]++;
-                    if (M_out_it[i] % M_tile_size_out == 0 || M_out_it[i] == M_out) {
-                        M_out_it[i] = M_tile_size_out * M_out_tile_it;
-                        N_out_tile_it[i]++;
-                        if (N_out_tile_it[i] * N_tile_size_out >= N_out) {
-                            N_out_tile_it[i] = 0;
-                            M_out_it[i] = M_tile_size_out * (M_out_tile_it+1);
-                            if (M_out_it[i] >= M_out) {
-                                assert(in_cnt[i] == -1);
+                    partition.m_out_it++;
+                    if (partition.m_out_it % M_tile_size_out == 0 || partition.m_out_it == M_out) {
+                        partition.m_out_it = M_tile_size_out * M_out_tile_it;
+                        partition.n_out_tile_it++;
+                        if (partition.n_out_tile_it * N_tile_size_out >= N_out) {
+                            partition.n_out_tile_it = 0;
+                            partition.m_out_it = M_tile_size_out * (M_out_tile_it+1);
+                            if (partition.m_out_it >= M_out) {
+                                assert(partition.in_cnt == -1);
                                 std::cout<<clk_<<" Output Exhausted: Array"<<i<<". Turn off PIM mode.\n";
-                                in_pim[i] = false;
-                                if (cut_height < pim_config_.vcuts) in_pim[i+1] = false;
+                                partition.in_pim = false;
+                                if (cut_height < pim_config_.vcuts) partitions_[i+1].in_pim = false;
                                 turn_off = true;
-                                for (size_t j = 0; j < in_pim.size(); j++) {
-                                    if (in_pim[j]) {
+                                for (size_t j = 0; j < partitions_.size(); j++) {
+                                    if (partitions_[j].in_pim) {
                                         turn_off = false;
                                     }
 
@@ -721,8 +689,8 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
                         }
 
-                        output_valid[i]--;
-                        if (cut_height < pim_config_.vcuts) output_valid[i+1]--;
+                        partition.output_valid--;
+                        if (cut_height < pim_config_.vcuts) partitions_[i+1].output_valid--;
                         // Output Tile Finished
                     }
                 }
