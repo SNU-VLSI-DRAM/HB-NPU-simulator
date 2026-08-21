@@ -91,6 +91,10 @@ class Controller {
     void IssueCommand(const Command &tmp_cmd);
     Command TransToCommand(const Transaction &trans);
     void UpdateCommandStats(const Command &cmd);
+    bool PimQueuesEmpty() const;
+    void ScheduleWeightPimCommands();
+    void ScheduleInputPimCommands();
+    void ScheduleOutputPimCommands();
 };
 }  // namespace dramsim3
 #endif

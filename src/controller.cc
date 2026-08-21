@@ -70,6 +70,108 @@ bool Controller::pim_refresh_coming() {
     return refresh_.pim_refresh_coming();
 }
 
+bool Controller::PimQueuesEmpty() const {
+    return rd_w_cmds_.empty() && rd_in_cmds_.empty() && wr_cmds_.empty();
+}
+
+void Controller::ScheduleWeightPimCommands() {
+    for (auto it = rd_w_cmds_.begin(); it != rd_w_cmds_.end(); ) {
+
+        bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
+        bool is_read = it->cmd_type == CommandType::GH_READ;
+        bool is_readp = it->cmd_type == CommandType::GH_READ_PRECHARGE;
+        bool is_pim = it->cmd_type == CommandType::PIM_ACTIVATE || it->cmd_type == CommandType::GH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ;
+
+        CommandType act_type = CommandType::PIM_ACTIVATE;
+        CommandType read_type = CommandType::GH_READ;
+        CommandType readp_type = CommandType::GH_READ_PRECHARGE;
+
+        Command ready_cmd;
+        if (is_act) {
+            Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
+            ready_cmd = GetReadyCommand(rd_cmd, clk_);
+        }
+        else if (it->cmd_type == CommandType::PRECHARGE)
+            ready_cmd = *it;
+        else
+            ready_cmd = GetReadyCommand(*it, clk_);
+
+
+        if (ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
+            if (!(channel_state_.IsRefreshWaiting() && is_act)) {
+
+                IssueCommand(*it);
+            }
+            it = rd_w_cmds_.erase(it); // TODO it++ when not erased
+        }
+        else it++;
+
+    }
+}
+
+void Controller::ScheduleInputPimCommands() {
+    int i = 0;
+    int j = 0;
+    for (auto it = rd_in_cmds_.begin(); it != rd_in_cmds_.end(); ) {
+
+        bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
+        bool is_read = it->cmd_type == CommandType::LH_READ || it->cmd_type == CommandType::GH_READ;
+        bool is_readp = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ_PRECHARGE;
+        bool is_local = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::LH_READ;
+
+        CommandType act_type = CommandType::PIM_ACTIVATE;
+        CommandType read_type = is_local ? CommandType::LH_READ : CommandType::GH_READ;
+        CommandType readp_type = is_local ? CommandType::LH_READ_PRECHARGE : CommandType::GH_READ_PRECHARGE;
+
+        Command ready_cmd;
+        if (is_act) {
+            // std::cout<<clk_<<" "<<j<<" "<<*it<<std::endl;
+            Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
+            ready_cmd = GetReadyCommand(rd_cmd, clk_);
+        }
+        else
+            ready_cmd = GetReadyCommand(*it, clk_);
+
+        if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type && clk_ >= release_time[i]) {
+            if (!(channel_state_.IsRefreshWaiting() && is_act)) {
+                IssueCommand(*it);
+            }
+            // std::cout<<clk_<<" erase "<<std::endl;
+            it = rd_in_cmds_.erase(it); // TODO it++ when not erased
+            release_time.erase(release_time.begin() + i);
+        }
+        else {
+            it++;
+            i++;
+        }
+        j++;
+    }
+}
+
+void Controller::ScheduleOutputPimCommands() {
+    for (auto it = wr_cmds_.begin(); it != wr_cmds_.end(); ) {
+        Command ready_cmd;
+        if (it->cmd_type == CommandType::PIM_ACTIVATE) {
+            Command wr_cmd = Command(CommandType::PIM_WRITE, it->addr, it->hex_addr);
+            ready_cmd = GetReadyCommand(wr_cmd, clk_);
+        }
+        else
+            ready_cmd = GetReadyCommand(*it, clk_);
+
+        if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
+            if (!(channel_state_.IsRefreshWaiting() && it->cmd_type == CommandType::PIM_ACTIVATE)) {
+                IssueCommand(*it);
+                it = wr_cmds_.erase(it); // TODO it++ when not erased
+                if (wr_multitenant) break;
+            }
+            else
+                it = wr_cmds_.erase(it); // TODO it++ when not erased
+
+        }
+        else it++;
+    }
+}
+
 void Controller::ClockTick() {
     // update refresh counter
     refresh_.ClockTick();
@@ -89,7 +191,7 @@ void Controller::ClockTick() {
     }
 
     // priority 2: pim command
-    if (cmd.IsRefresh() || (rd_w_cmds_.empty() && rd_in_cmds_.empty() && wr_cmds_.empty())) {
+    if (cmd.IsRefresh() || PimQueuesEmpty()) {
 
         if (cmd.IsValid()) {
             IssueCommand(cmd);
@@ -109,95 +211,9 @@ void Controller::ClockTick() {
     else {
         // TODO if second == 0, issue and set cmd_issue true. else, decrement by 1.
         cmd_issued = true;
-        for (auto it = rd_w_cmds_.begin(); it != rd_w_cmds_.end(); ) {
-
-            bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
-            bool is_read = it->cmd_type == CommandType::GH_READ;
-            bool is_readp = it->cmd_type == CommandType::GH_READ_PRECHARGE;
-            bool is_pim = it->cmd_type == CommandType::PIM_ACTIVATE || it->cmd_type == CommandType::GH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ;
-
-            CommandType act_type = CommandType::PIM_ACTIVATE;
-            CommandType read_type = CommandType::GH_READ;
-            CommandType readp_type = CommandType::GH_READ_PRECHARGE;
-
-            Command ready_cmd;
-            if (is_act) {
-                Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
-                ready_cmd = GetReadyCommand(rd_cmd, clk_);
-            }
-            else if (it->cmd_type == CommandType::PRECHARGE)
-                ready_cmd = *it;
-            else
-                ready_cmd = GetReadyCommand(*it, clk_);
-
-
-            if (ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
-                if (!(channel_state_.IsRefreshWaiting() && is_act)) {
-
-                    IssueCommand(*it);
-                }
-                it = rd_w_cmds_.erase(it); // TODO it++ when not erased
-            }
-            else it++;
-
-        }
-        int i = 0;
-        int j = 0;
-        for (auto it = rd_in_cmds_.begin(); it != rd_in_cmds_.end(); ) {
-
-            bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
-            bool is_read = it->cmd_type == CommandType::LH_READ || it->cmd_type == CommandType::GH_READ;
-            bool is_readp = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ_PRECHARGE;
-            bool is_local = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::LH_READ;
-
-            CommandType act_type = CommandType::PIM_ACTIVATE;
-            CommandType read_type = is_local ? CommandType::LH_READ : CommandType::GH_READ;
-            CommandType readp_type = is_local ? CommandType::LH_READ_PRECHARGE : CommandType::GH_READ_PRECHARGE;
-
-            Command ready_cmd;
-            if (is_act) {
-                // std::cout<<clk_<<" "<<j<<" "<<*it<<std::endl;
-                Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
-                ready_cmd = GetReadyCommand(rd_cmd, clk_);
-            }
-            else
-                ready_cmd = GetReadyCommand(*it, clk_);
-
-            if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type && clk_ >= release_time[i]) {
-                if (!(channel_state_.IsRefreshWaiting() && is_act)) {
-                    IssueCommand(*it);
-                }
-                // std::cout<<clk_<<" erase "<<std::endl;
-                it = rd_in_cmds_.erase(it); // TODO it++ when not erased
-                release_time.erase(release_time.begin() + i);
-            }
-            else {
-                it++;
-                i++;
-            }
-            j++;
-        }
-        for (auto it = wr_cmds_.begin(); it != wr_cmds_.end(); ) {
-            Command ready_cmd;
-            if (it->cmd_type == CommandType::PIM_ACTIVATE) {
-                Command wr_cmd = Command(CommandType::PIM_WRITE, it->addr, it->hex_addr);
-                ready_cmd = GetReadyCommand(wr_cmd, clk_);
-            }
-            else
-                ready_cmd = GetReadyCommand(*it, clk_);
-
-            if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
-                if (!(channel_state_.IsRefreshWaiting() && it->cmd_type == CommandType::PIM_ACTIVATE)) {
-                    IssueCommand(*it);
-                    it = wr_cmds_.erase(it); // TODO it++ when not erased
-                    if (wr_multitenant) break;
-                }
-                else
-                    it = wr_cmds_.erase(it); // TODO it++ when not erased
-
-            }
-            else it++;
-        }
+        ScheduleWeightPimCommands();
+        ScheduleInputPimCommands();
+        ScheduleOutputPimCommands();
         // rd_in_cmds_.clear(); //used in MT
     }
 
