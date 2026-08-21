@@ -74,6 +74,20 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool AddTransaction(uint64_t hex_addr, bool is_write) override;
     void ClockTick() override;
     Command GetReadyCommandPIM(Transaction trans, CommandType type);
+
+   private:
+    void ReturnCompletedTransactions();
+    bool CheckRefreshWindow();
+    void ProcessPimTransaction();
+    bool PimCommandsBlockedByRefresh() const;
+    void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
+    void DispatchCommands(
+        const std::vector<std::vector<Command>>& weight_commands,
+        const std::vector<std::vector<Command>>& input_commands,
+        const std::vector<std::vector<Command>>& output_commands);
+    void TickControllers();
+
+   public:
     // dataflow configuration
     int vcuts = -1;
     int hcuts = -1;

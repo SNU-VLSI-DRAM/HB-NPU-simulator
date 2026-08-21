@@ -177,6 +177,19 @@ bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr, bool is_write) {
 }
 
 void JedecDRAMSystem::ClockTick() {
+    ReturnCompletedTransactions();
+    bool wait_refresh = CheckRefreshWindow();
+    ProcessPimTransaction();
+    bool is_in_ref = PimCommandsBlockedByRefresh();
+    SchedulePimCommands(wait_refresh, is_in_ref);
+    TickControllers();
+    clk_++;
+    if (clk_ % config_.epoch_period == 0) {
+        PrintEpochStats();
+    }
+}
+
+void JedecDRAMSystem::ReturnCompletedTransactions() {
     for (size_t i = 0; i < ctrls_.size(); i++) {
         // look ahead and return earlier
         while (true) {
@@ -191,6 +204,9 @@ void JedecDRAMSystem::ClockTick() {
         }
     }
 
+}
+
+bool JedecDRAMSystem::CheckRefreshWindow() {
     // std::cout<<"Clock Cycle "<<clk_<<std::endl;
 
     // We calculate the refresh timing and pause PIM operations if a refresh is expected to occur during PIM operations.
@@ -210,6 +226,10 @@ void JedecDRAMSystem::ClockTick() {
     }
 
 
+    return wait_refresh;
+}
+
+void JedecDRAMSystem::ProcessPimTransaction() {
     //*** Custom Transaction Queue Manager ***//
     // Pop a PIM transaction if the queue is not empty
     if (!pim_trans_queue_.empty()) {
@@ -365,12 +385,19 @@ void JedecDRAMSystem::ClockTick() {
         }
     }
 
+}
+
+bool JedecDRAMSystem::PimCommandsBlockedByRefresh() const {
     bool is_in_ref = false;
     for (int i=0; i<ctrls_.size(); i++) {
         if (ctrls_[i]->IsInRef() || ctrls_[i]->pim_refresh_coming2())
             is_in_ref = true;
     }
 
+    return is_in_ref;
+}
+
+void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
     //*** HB-NPU Command Scheduler ***//
     // We are currently developing multi-tenant workload support in the NPU by partitioning the array and running them independently.
     // Please ignore these variables (~cut~) for now.
@@ -748,42 +775,45 @@ void JedecDRAMSystem::ClockTick() {
         }
 
         // Finally the scheduler sends the aggregated commands to channel controllers by pushing them into custom command queues, which are managed in-order.
-        for (auto& it: w_cmds) {
-            for (auto& it2: it) {
-               // std::cout<<clk_<<" "<<it<<std::endl;
-                ctrls_[it2.Channel()]->rd_w_cmds_.push_back(it2);
-            }
-        }
-        for (auto& it: in_cmds) {
-            for (auto& it2: it) {
-                ctrls_[it2.Channel()]->rd_in_cmds_.push_back(it2);
-                int release_time_ = clk_;
-                if (it2.cmd_type == CommandType::PIM_ACTIVATE) release_time_ += 0;  // + (it.Channel() % cut_height)*config_.tCCD_S);
-                ctrls_[it2.Channel()]->release_time.push_back(release_time_);
-            }
-        }
-        for (auto& it: out_cmds) {
-            for (auto& it2: it) {
-
-                ctrls_[it2.Channel()]->wr_cmds_.push_back(it2);
-            }
-        }
+        DispatchCommands(w_cmds, in_cmds, out_cmds);
 
     }
 
 
 
 
+}
+
+void JedecDRAMSystem::DispatchCommands(
+    const std::vector<std::vector<Command>>& weight_commands,
+    const std::vector<std::vector<Command>>& input_commands,
+    const std::vector<std::vector<Command>>& output_commands) {
+    for (auto& it: weight_commands) {
+        for (auto& it2: it) {
+           // std::cout<<clk_<<" "<<it<<std::endl;
+            ctrls_[it2.Channel()]->rd_w_cmds_.push_back(it2);
+        }
+    }
+    for (auto& it: input_commands) {
+        for (auto& it2: it) {
+            ctrls_[it2.Channel()]->rd_in_cmds_.push_back(it2);
+            int release_time_ = clk_;
+            if (it2.cmd_type == CommandType::PIM_ACTIVATE) release_time_ += 0;  // + (it.Channel() % cut_height)*config_.tCCD_S);
+            ctrls_[it2.Channel()]->release_time.push_back(release_time_);
+        }
+    }
+    for (auto& it: output_commands) {
+        for (auto& it2: it) {
+            ctrls_[it2.Channel()]->wr_cmds_.push_back(it2);
+        }
+    }
+}
+
+void JedecDRAMSystem::TickControllers() {
     for (size_t i = 0; i < ctrls_.size(); i++) {
         ctrls_[i]->ClockTick();
     }
 
-    clk_++;
-
-    if (clk_ % config_.epoch_period == 0) {
-        PrintEpochStats();
-    }
-    return;
 }
 
 Command JedecDRAMSystem::GetReadyCommandPIM(Transaction trans, CommandType type) {
