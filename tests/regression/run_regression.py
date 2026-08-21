@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,22 @@ QUICK_CASES = {
     "attention_sv": ROOT / "tests/regression/fixtures/attention_sv.trace",
     "refresh_boundary": ROOT / "tests/regression/fixtures/refresh_boundary.trace",
 }
+
+
+def opt27b_cases():
+    base = ROOT / "traces/OPT-2.7B_128_1024_32"
+    cases = []
+    for name in ("createQKV", "QK", "SV", "Wo", "L1", "L2"):
+        cases.append(("prompt/" + name, base / "prompt" / name))
+    for name in ("createQKV", "Wo", "L1", "L2"):
+        cases.append(("decode/" + name, base / "decode" / name))
+        cases.append(("decode/WS/" + name, base / "decode" / "WS" / name))
+    for sequence in range(128, 144):
+        for operation in ("QK", "SV"):
+            filename = "{}_{:04d}".format(operation, sequence)
+            cases.append(("decode/QKV/" + filename,
+                          base / "decode" / "QKV" / filename))
+    return cases
 
 
 def parse_command_trace(path):
@@ -167,9 +184,54 @@ def run_quick(binary, update_golden):
         print("PASS " + name)
 
 
+def summarize_long_case(full_result):
+    command_sha256 = {}
+    for channel, commands in full_result["commands"].items():
+        canonical = json.dumps(
+            commands, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        command_sha256[channel] = hashlib.sha256(canonical).hexdigest()
+    return {
+        "terminated": full_result["terminated"],
+        "termination_cycle": full_result["termination_cycle"],
+        "command_sha256": command_sha256,
+        "stats": full_result["stats"],
+    }
+
+
+def run_opt27b_once(binary):
+    kernels = {}
+    for name, trace in opt27b_cases():
+        kernels[name] = summarize_long_case(run_case(binary, trace))
+    return {
+        "model": "OPT-2.7B",
+        "input_tokens": 128,
+        "output_tokens": 16,
+        "batch_size": 32,
+        "kernels": kernels,
+    }
+
+
+def run_opt27b(binary, update_golden):
+    golden_path = ROOT / "tests/regression/golden/opt27b_128_16_32.json"
+    actual = run_opt27b_once(binary)
+    if update_golden:
+        second = run_opt27b_once(binary)
+        third = run_opt27b_once(binary)
+        if actual != second or actual != third:
+            raise AssertionError("unstable OPT-2.7B baseline")
+        golden_path.write_text(
+            json.dumps(actual, indent=2, sort_keys=True) + "\n"
+        )
+    else:
+        expected = json.loads(golden_path.read_text())
+        compare_value(actual, expected, [])
+    print("PASS opt27b_128_16_32")
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--binary", required=True, type=Path)
-parser.add_argument("--suite", choices=("quick",), required=True)
+parser.add_argument("--suite", choices=("quick", "opt27b"), required=True)
 parser.add_argument("--update-golden", action="store_true")
 
 
@@ -177,6 +239,8 @@ def main():
     args = parser.parse_args()
     if args.suite == "quick":
         run_quick(args.binary, args.update_golden)
+    if args.suite == "opt27b":
+        run_opt27b(args.binary, args.update_golden)
 
 
 if __name__ == "__main__":

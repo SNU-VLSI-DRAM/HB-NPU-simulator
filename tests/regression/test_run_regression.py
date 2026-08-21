@@ -2,6 +2,7 @@ import copy
 import contextlib
 import gzip
 import importlib
+import json
 import os
 from pathlib import Path
 import stat
@@ -186,6 +187,96 @@ print("simulation ended without marker")
                     run_case=lambda binary, trace: regression_result(3900)):
                 with self.assertRaisesRegex(AssertionError, "refresh fixture did not cross tREFI"):
                     run_regression.run_quick(Path("unused"), False)
+
+    def test_opt27b_manifest_selects_exact_ordered_46_kernel_window(self):
+        cases = run_regression.opt27b_cases()
+
+        self.assertEqual(len(cases), 46)
+        self.assertEqual(
+            [name for name, trace in cases[:14]],
+            [
+                "prompt/createQKV", "prompt/QK", "prompt/SV", "prompt/Wo",
+                "prompt/L1", "prompt/L2", "decode/createQKV",
+                "decode/WS/createQKV", "decode/Wo", "decode/WS/Wo",
+                "decode/L1", "decode/WS/L1", "decode/L2", "decode/WS/L2",
+            ],
+        )
+        self.assertEqual(
+            [name for name, trace in cases[14:18]],
+            ["decode/QKV/QK_0128", "decode/QKV/SV_0128",
+             "decode/QKV/QK_0129", "decode/QKV/SV_0129"],
+        )
+        self.assertEqual(
+            [name for name, trace in cases[-2:]],
+            ["decode/QKV/QK_0143", "decode/QKV/SV_0143"],
+        )
+        self.assertEqual(
+            cases[7][1],
+            run_regression.ROOT / "traces/OPT-2.7B_128_1024_32/decode/WS/createQKV",
+        )
+
+    def test_long_summary_hashes_canonical_ordered_commands_and_discards_them(self):
+        result = regression_result(42)
+        result["commands"] = {
+            "1": [{"kind": "act", "cycle": 7}],
+            "0": [{"cycle": 3, "kind": "pre"}],
+        }
+        result["stats"] = {"0": {"total_energy": 1.0}}
+
+        self.assertEqual(run_regression.summarize_long_case(result), {
+            "terminated": True,
+            "termination_cycle": 42,
+            "command_sha256": {
+                "0": "ebef1875d30b2d03b381c5776aedad7ba2b87df65296f3d8f96511e79d44fba8",
+                "1": "c62e5e19ce2fe6a47c0b6c99d902d8586d83edf00c0cf2b6038538d7c10a107e",
+            },
+            "stats": {"0": {"total_energy": 1.0}},
+        })
+
+    def test_ordinary_opt27b_comparison_rejects_changes_without_writing_golden(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            golden_path = temp_dir / "tests/regression/golden/opt27b_128_16_32.json"
+            golden_path.parent.mkdir(parents=True)
+            expected = {
+                "model": "OPT-2.7B", "input_tokens": 128,
+                "output_tokens": 16, "batch_size": 32,
+                "kernels": {"prompt/QK": {"terminated": True,
+                            "termination_cycle": 42,
+                            "command_sha256": {"0": "expected"},
+                            "stats": {"0": {"total_energy": 1.0}}}},
+            }
+            golden_path.write_text(json.dumps(expected, indent=2, sort_keys=True) + "\n")
+            before = golden_path.read_bytes()
+            actual = copy.deepcopy(expected)
+            actual["kernels"]["prompt/QK"]["command_sha256"]["0"] = "actual"
+
+            with replace_runner_globals(ROOT=temp_dir, run_opt27b_once=lambda binary: actual):
+                with self.assertRaisesRegex(
+                        AssertionError,
+                        "kernels/prompt/QK/command_sha256/0.*expected.*actual"):
+                    run_regression.run_opt27b(Path("unused"), False)
+
+            self.assertEqual(golden_path.read_bytes(), before)
+
+    def test_update_opt27b_rejects_unstable_baseline_without_creating_golden(self):
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            stable = {
+                "model": "OPT-2.7B", "input_tokens": 128,
+                "output_tokens": 16, "batch_size": 32, "kernels": {},
+            }
+            unstable = copy.deepcopy(stable)
+            unstable["output_tokens"] = 17
+            results = iter([stable, unstable, unstable])
+
+            with replace_runner_globals(
+                    ROOT=temp_dir, run_opt27b_once=lambda binary: next(results)):
+                with self.assertRaisesRegex(AssertionError, "unstable OPT-2.7B baseline"):
+                    run_regression.run_opt27b(Path("unused"), True)
+
+            self.assertFalse(
+                (temp_dir / "tests/regression/golden/opt27b_128_16_32.json").exists())
 
 
 if __name__ == "__main__":

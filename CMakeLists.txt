@@ -129,6 +129,18 @@ set_tests_properties(hbnpu_quick_regression PROPERTIES
     LABELS "quick"
 )
 
+add_test(
+    NAME hbnpu_opt27b_end_to_end
+    COMMAND ${PYTHON_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/regression/run_regression.py
+            --binary $<TARGET_FILE:dramsim3main>
+            --suite opt27b
+)
+set_tests_properties(hbnpu_opt27b_end_to_end PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "long"
+)
+
 # We have to use this custome command because there's a bug in cmake
 # that if you do `make test` it doesn't build your updated test files
 # so we're stucking with `make dramsim3test` for now
