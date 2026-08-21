@@ -1,8 +1,53 @@
 #include "catch.hpp"
+#include "controller.h"
 #include "pim_command_batch.h"
 #include "pim_config.h"
 #include "pim_partition_state.h"
 #include "pim_transaction.h"
+#include "timing.h"
+
+namespace dramsim3 {
+class ControllerTestPeer {
+   public:
+    static const std::vector<Command>& Weight(const Controller& controller) {
+        return controller.rd_w_cmds_;
+    }
+    static const std::vector<Command>& Input(const Controller& controller) {
+        return controller.rd_in_cmds_;
+    }
+    static const std::vector<int>& ReleaseTimes(const Controller& controller) {
+        return controller.release_time;
+    }
+    static const std::vector<Command>& Output(const Controller& controller) {
+        return controller.wr_cmds_;
+    }
+};
+}  // namespace dramsim3
+
+TEST_CASE("Controller PIM enqueue methods preserve order", "[pim]") {
+    using namespace dramsim3;
+    Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
+    Timing timing(config);
+    Controller controller(0, config, timing);
+    Command first(CommandType::PIM_ACTIVATE,
+                  Address(0, 0, 0, 0, 1, 2), 3);
+    Command second(CommandType::GH_READ,
+                   Address(0, 0, 0, 1, 4, 5), 6);
+    std::vector<Command> commands{first, second};
+
+    controller.EnqueueWeightCommands(commands);
+    controller.EnqueueInputCommands(commands, std::vector<int>{20, 21});
+    controller.EnqueueOutputCommands(commands);
+
+    REQUIRE(ControllerTestPeer::Weight(controller)[0].hex_addr == 3);
+    REQUIRE(ControllerTestPeer::Weight(controller)[1].hex_addr == 6);
+    REQUIRE(ControllerTestPeer::Input(controller)[0].hex_addr == 3);
+    REQUIRE(ControllerTestPeer::Input(controller)[1].hex_addr == 6);
+    REQUIRE(ControllerTestPeer::ReleaseTimes(controller) ==
+            std::vector<int>{20, 21});
+    REQUIRE(ControllerTestPeer::Output(controller)[0].hex_addr == 3);
+    REQUIRE(ControllerTestPeer::Output(controller)[1].hex_addr == 6);
+}
 
 TEST_CASE("PIM command batch preserves order and release pairing", "[pim]") {
     using namespace dramsim3;

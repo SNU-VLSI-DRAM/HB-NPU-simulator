@@ -40,13 +40,22 @@ class Controller {
     bool pim_refresh_coming();
     bool pim_refresh_coming2() { return refresh_.pim_refresh_coming2();};
     bool IsInRef() { return cmd_queue_.IsInRef(); };
+    void EnqueueWeightCommands(const std::vector<Command>& commands);
+    void EnqueueInputCommands(const std::vector<Command>& commands,
+                              const std::vector<int>& release_times);
+    void EnqueueOutputCommands(const std::vector<Command>& commands);
 
     int channel_id_;
+
+   private:
+    friend class ControllerTestPeer;
 
     std::vector<Command> rd_in_cmds_;
     std::vector<Command> rd_w_cmds_;
     std::vector<Command> wr_cmds_;
     std::vector<int> release_time;
+
+   public:
     bool wr_multitenant = false;
     bool in_pim = false;
 

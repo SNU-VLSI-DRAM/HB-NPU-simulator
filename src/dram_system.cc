@@ -711,15 +711,18 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
     for (auto& command: batch.weight_commands) {
        // std::cout<<clk_<<" "<<command<<std::endl;
-        ctrls_[command.Channel()]->rd_w_cmds_.push_back(command);
+        ctrls_[command.Channel()]->EnqueueWeightCommands(
+            std::vector<Command>(1, command));
     }
     for (size_t i = 0; i < batch.input_commands.size(); i++) {
         const Command& command = batch.input_commands[i];
-        ctrls_[command.Channel()]->rd_in_cmds_.push_back(command);
-        ctrls_[command.Channel()]->release_time.push_back(batch.input_release_times[i]);
+        ctrls_[command.Channel()]->EnqueueInputCommands(
+            std::vector<Command>(1, command),
+            std::vector<int>(1, batch.input_release_times[i]));
     }
     for (auto& command: batch.output_commands) {
-        ctrls_[command.Channel()]->wr_cmds_.push_back(command);
+        ctrls_[command.Channel()]->EnqueueOutputCommands(
+            std::vector<Command>(1, command));
     }
 }
 

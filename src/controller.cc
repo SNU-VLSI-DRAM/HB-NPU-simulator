@@ -70,6 +70,21 @@ bool Controller::pim_refresh_coming() {
     return refresh_.pim_refresh_coming();
 }
 
+void Controller::EnqueueWeightCommands(const std::vector<Command>& commands) {
+    rd_w_cmds_.insert(rd_w_cmds_.end(), commands.begin(), commands.end());
+}
+
+void Controller::EnqueueInputCommands(
+    const std::vector<Command>& commands,
+    const std::vector<int>& release_times) {
+    rd_in_cmds_.insert(rd_in_cmds_.end(), commands.begin(), commands.end());
+    release_time.insert(release_time.end(), release_times.begin(), release_times.end());
+}
+
+void Controller::EnqueueOutputCommands(const std::vector<Command>& commands) {
+    wr_cmds_.insert(wr_cmds_.end(), commands.begin(), commands.end());
+}
+
 bool Controller::PimQueuesEmpty() const {
     return rd_w_cmds_.empty() && rd_in_cmds_.empty() && wr_cmds_.empty();
 }
