@@ -8,6 +8,7 @@
 #include "common.h"
 #include "configuration.h"
 #include "controller.h"
+#include "pim_config.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -86,22 +87,9 @@ class JedecDRAMSystem : public BaseDRAMSystem {
         const std::vector<std::vector<Command>>& input_commands,
         const std::vector<std::vector<Command>>& output_commands);
     void TickControllers();
+    PimDataflowConfig pim_config_;
 
    public:
-    // dataflow configuration
-    int vcuts = -1;
-    int hcuts = -1;
-    int mcf = 1;
-    int ucf = 1;
-    int mc = 1;
-    int df = -1;
-    int vcuts_next = -1;
-    int hcuts_next = -1;
-    // TODO now it is same with all cuts, but it should be not
-    int M_tile_size = 0;
-    // TODO stride and kernel size also must be vectors
-    int stride = 0;
-    int kernel_size = 0;
     // workload configuration
     std::vector<uint64_t> base_rows_in;
     std::vector<uint64_t> base_rows_w;

@@ -1,5 +1,28 @@
 #include "catch.hpp"
+#include "pim_config.h"
 #include "pim_transaction.h"
+
+TEST_CASE("PIM dataflow config preserves defaults and decoded values", "[pim]") {
+    using namespace dramsim3;
+    PimDataflowConfig config;
+    REQUIRE(config.vcuts == -1);
+    REQUIRE(config.hcuts == -1);
+    REQUIRE(config.mcf == 1);
+    REQUIRE(config.ucf == 1);
+    REQUIRE(config.mc == 1);
+    REQUIRE(config.df == -1);
+    REQUIRE(config.m_tile_size == 0);
+
+    config.Load(PimTransactionDecoder::Decode(0x2ec860));
+    REQUIRE(config.vcuts == 1);
+    REQUIRE(config.hcuts == 1);
+    REQUIRE(config.mcf == 2);
+    REQUIRE(config.ucf == 8);
+    REQUIRE(config.mc == 16);
+    REQUIRE(config.df == 1);
+    REQUIRE(config.m_tile_size == 2048);
+    REQUIRE(config.CutCount() == 1);
+}
 
 TEST_CASE("PIM transaction decoder preserves legacy encoding", "[pim]") {
     using namespace dramsim3;

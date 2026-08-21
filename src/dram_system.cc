@@ -215,9 +215,9 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
     // if countdown is lower than pim delay, pause issuing pim commands until refresh is done over all ranks
     bool wait_refresh = false;
     for (size_t i=0; i<ctrls_.size(); i++) {
-        if (ctrls_[i]->pim_refresh_coming() && vcuts != -1 && hcuts != -1) {
+        if (ctrls_[i]->pim_refresh_coming() && pim_config_.vcuts != -1 && pim_config_.hcuts != -1) {
             wait_refresh = true;
-            for (int j=0; j<vcuts*hcuts; j++) {
+            for (int j=0; j<pim_config_.vcuts*pim_config_.hcuts; j++) {
                 in_act_placed[j] = false;
                 w_act_placed[j] = false;
                 out_act_placed[j] = false;
@@ -240,7 +240,7 @@ void JedecDRAMSystem::ProcessPimTransaction() {
 
         switch (decoded.kind) {
         case PimTransactionKind::START_COMPUTATION: {
-            int cuts = vcuts * hcuts;
+            int cuts = pim_config_.vcuts * pim_config_.hcuts;
             bool configured = true;
             for (int i=0; i<cuts; i++)
                 if ((decoded.launch_mask & (1 << i)) && (M[i] != 0 && N[i] != 0 && K[i] != 0));
@@ -281,25 +281,15 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             out_act_placed.clear();
             output_valid.clear();
 
-            vcuts = decoded.vcuts;
-            hcuts = decoded.hcuts;
-            mcf = decoded.mcf;
-            ucf = decoded.ucf;
-            df = decoded.df;
-
-            mc = mcf * ucf;
-            if (vcuts * hcuts > 1) // TODO
+            pim_config_.LoadLayout(decoded);
+            if (pim_config_.vcuts * pim_config_.hcuts > 1) // TODO
                 for (int i=0; i<ctrls_.size(); i++) {
                     ctrls_[i]->wr_multitenant = true;
                 }
 
-            M_tile_size = decoded.m_tile_size;
-            vcuts_next = decoded.vcuts_next;
-            hcuts_next = decoded.hcuts_next;
-            kernel_size = decoded.kernel_size;
-            stride = decoded.stride;
+            pim_config_.LoadTiling(decoded);
 
-            int cuts = vcuts * hcuts;
+            int cuts = pim_config_.vcuts * pim_config_.hcuts;
             base_rows_w.assign(cuts, 0);
             base_rows_in.assign(cuts, 0);
             base_rows_out.assign(cuts, 0);
@@ -368,23 +358,23 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
     // We are currently developing multi-tenant workload support in the NPU by partitioning the array and running them independently.
     // Please ignore these variables (~cut~) for now.
     int cuts = 0;
-    if (vcuts != -1 && hcuts != -1) cuts = vcuts * hcuts;
+    if (pim_config_.vcuts != -1 && pim_config_.hcuts != -1) cuts = pim_config_.vcuts * pim_config_.hcuts;
     for (int i=0; i < cuts; i++) {
         if (!in_pim[i] || is_in_ref) continue;
 
-        int vcut_no = i % vcuts;
-        int cut_height = config_.channels / hcuts;
-        int hcut_no = i / vcuts;
-        int cut_width = config_.banks / vcuts;
+        int vcut_no = i % pim_config_.vcuts;
+        int cut_height = config_.channels / pim_config_.hcuts;
+        int hcut_no = i / pim_config_.vcuts;
+        int cut_width = config_.banks / pim_config_.vcuts;
 
-        int N_tile_size = 128 / vcuts; // 128 : the number of PEs in a row
+        int N_tile_size = 128 / pim_config_.vcuts; // 128 : the number of PEs in a row
         int N_tile_it = N_it[i] / N_tile_size;
-        int M_tile_it = M_it[i] / M_tile_size;
-        int M_current_tile_size = M[i] < M_tile_size * (M_tile_it + 1) ? M[i] % M_tile_size : M_tile_size;
+        int M_tile_it = M_it[i] / pim_config_.m_tile_size;
+        int M_current_tile_size = M[i] < pim_config_.m_tile_size * (M_tile_it + 1) ? M[i] % pim_config_.m_tile_size : pim_config_.m_tile_size;
         int K_tile_size = std::min(cut_height * 16, K[i]); // 16: the number of PEs supported by a bank's io
 
 
-        int weight_banks_reduce = df==0? 8:16; // Bank Interleaving option for weight loading
+        int weight_banks_reduce = pim_config_.df==0? 8:16; // Bank Interleaving option for weight loading
         std::vector<std::vector<Command>> in_cmds(cuts);
         std::vector<std::vector<Command>> w_cmds(cuts);
 
@@ -452,7 +442,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                     if (w_cmds[i].begin()->cmd_type == readp_type) {
                         w_act_placed[i] = false;
                     }
-                    if (df == 1 && w_cmds[i].begin()->cmd_type == CommandType::PRECHARGE) {
+                    if (pim_config_.df == 1 && w_cmds[i].begin()->cmd_type == CommandType::PRECHARGE) {
                         break;
                     }
 
@@ -485,22 +475,22 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
             case 2: { // Streaming data into PE array
                 CommandType act_type = CommandType::PIM_ACTIVATE;
                 // Weight stationary dataflow opts to use Global HB, while TS-GEMM/GEMV dataflow uses Local HB.
-                CommandType read_type = df == 0 ? CommandType::GH_READ : CommandType::LH_READ;
-                CommandType readp_type = df == 0 ? CommandType::GH_READ_PRECHARGE : CommandType::LH_READ_PRECHARGE;
+                CommandType read_type = pim_config_.df == 0 ? CommandType::GH_READ : CommandType::LH_READ;
+                CommandType readp_type = pim_config_.df == 0 ? CommandType::GH_READ_PRECHARGE : CommandType::LH_READ_PRECHARGE;
                 vpu_cnt[i]--;
                 vpu_cnt[i] = std::max(0, vpu_cnt[i]);
 
-                int col_offset = M_tile_it * (M_tile_size * ((K[i]-1) / K_tile_size + 1)) + K_tile_it[i] * M_current_tile_size + M_it[i] % M_tile_size;
+                int col_offset = M_tile_it * (pim_config_.m_tile_size * ((K[i]-1) / K_tile_size + 1)) + K_tile_it[i] * M_current_tile_size + M_it[i] % pim_config_.m_tile_size;
                 bool mixed = false;
                 Command mixed_cmd;
                 // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
                 for (int j=0; j<cut_height; j++) {
                     // It can generate commands for multiple banks per channel simultaneously depending on the dataflow configuration.
-                    for (int k=0; k<mc; k++) {
+                    for (int k=0; k<pim_config_.mc; k++) {
 
                         int ch = hcut_no * cut_height + j;
-                        int bk = vcut_no * cut_width + k*(cut_width/mc);
-                        if (df==0) bk++;
+                        int bk = vcut_no * cut_width + k*(cut_width/pim_config_.mc);
+                        if (pim_config_.df==0) bk++;
                         int bg = bk / config_.banks_per_group;
                         bk = bk % config_.banks_per_group;
 
@@ -509,7 +499,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         uint64_t hex_addr = config_.AddressUnmapping(addr);
                         bool close = M_it[i] + 1 == M[i]; // prevent closing between tiles
                         bool close2 = (K_tile_it[i]+1) * K_tile_size >= K[i]; // leave open in WS since batch size is too small in LLMs
-                        bool close3 = df==0?close2 && close:close;
+                        bool close3 = pim_config_.df==0?close2 && close:close;
                         // generate read-precharge command if this is the last access to read the tile.
                         CommandType cmd_type = close3 || addr.column == config_.columns / config_.BL - 1 ? readp_type : read_type;
                         Command cmd = Command(cmd_type, addr, hex_addr);
@@ -574,20 +564,20 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         break;
                     }
 
-                    assert(M_tile_size > 128/vcuts);
+                    assert(pim_config_.m_tile_size > 128/pim_config_.vcuts);
 
                     // Update NPU status. Countdown the operation delay.
-                    if ((K_tile_it[i]+1) * K_tile_size >= K[i] && M_it[i] % M_tile_size == 0) {
+                    if ((K_tile_it[i]+1) * K_tile_size >= K[i] && M_it[i] % pim_config_.m_tile_size == 0) {
                         out_cnt[i] = std::max(1, config_.tCCD_L * (3 + 16) - config_.tRCDWR);
                     }
 
 
                     // Increment Iterators
                     M_it[i]++;
-                    if (M_it[i] % M_tile_size == 0 || M_it[i] == M[i]) {
-                        in_cnt[i] = std::max(1, config_.tCCD_L * std::max(128/(vcuts*mc), 16) - config_.tRCDRD);
+                    if (M_it[i] % pim_config_.m_tile_size == 0 || M_it[i] == M[i]) {
+                        in_cnt[i] = std::max(1, config_.tCCD_L * std::max(128/(pim_config_.vcuts*pim_config_.mc), 16) - config_.tRCDRD);
                         iw_status[i]++;
-                        M_it[i] = M_tile_size * M_tile_it;
+                        M_it[i] = pim_config_.m_tile_size * M_tile_it;
                         K_tile_it[i]++;
 
                         if (K_tile_it[i] * K_tile_size >= K[i]) {
@@ -596,7 +586,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                             N_it[i] = N_tile_size * (N_tile_it+1);
                             if (N_it[i] >= N[i]) {
                                 N_it[i] = 0;
-                                M_it[i] = M_tile_size * (M_tile_it + 1);
+                                M_it[i] = pim_config_.m_tile_size * (M_tile_it + 1);
                                 if (M_it[i] >= M[i]) {
                                     std::cout<<clk_<<" End of Computation "<<i<<std::endl;
                                     in_cnt[i] = -1;
@@ -637,34 +627,34 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
 
         // Writing Output from NPU to DRAM
         // Command Scheduler lookups the NPU status to check if the output data is ready to be sent to DRAM.
-        bool out_enable = cut_height / vcuts > 0 || vcut_no % 2 == 0;
+        bool out_enable = cut_height / pim_config_.vcuts > 0 || vcut_no % 2 == 0;
         if (output_valid[i] > 0 && output_ready && out_enable) {
-            int vcut_out_no = M[i] == 1 ? vcut_no : vcuts == 16 ? vcut_no / 2 : (vcut_no + N_out_tile_it[i]) % vcuts; // relates to channel number
-            int M_tile_size_out = df == 1 ? (M_tile_size/128)*mcf : M_tile_size;
+            int vcut_out_no = M[i] == 1 ? vcut_no : pim_config_.vcuts == 16 ? vcut_no / 2 : (vcut_no + N_out_tile_it[i]) % pim_config_.vcuts; // relates to channel number
+            int M_tile_size_out = pim_config_.df == 1 ? (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
             int M_out_tile_it = M_out_it[i] / M_tile_size_out;
-            int M_out = df == 1 ? std::max(1, M[i]*mcf / 128) : M[i];
+            int M_out = pim_config_.df == 1 ? std::max(1, M[i]*pim_config_.mcf / 128) : M[i];
             int M_out_current_tile_size = M_out < M_tile_size_out * (M_out_tile_it + 1) ? M_out % M_tile_size_out : M_tile_size_out;
-            int N_out = df == 1 ? 128 : N[i];
-            int N_tile_size_out = df == 1 ? 128 : N_tile_size;
+            int N_out = pim_config_.df == 1 ? 128 : N[i];
+            int N_tile_size_out = pim_config_.df == 1 ? 128 : N_tile_size;
             int N_tile_num = (N[i]-1) / N_tile_size_out + 1;
-            int N_tile_num_ch = (N_tile_num) / vcuts; // varies by channels to be accessed
-            N_tile_num_ch += N_tile_num % vcuts > N_out_tile_it[i] % vcuts ? 1 : 0;
-            int N_tile_it_ch = N_out_tile_it[i] / vcuts;
+            int N_tile_num_ch = (N_tile_num) / pim_config_.vcuts; // varies by channels to be accessed
+            N_tile_num_ch += N_tile_num % pim_config_.vcuts > N_out_tile_it[i] % pim_config_.vcuts ? 1 : 0;
+            int N_tile_it_ch = N_out_tile_it[i] / pim_config_.vcuts;
             int col_offset = M_out_tile_it * (M_tile_size_out * N_tile_num_ch) + N_tile_it_ch * M_out_current_tile_size + M_out_it[i] % M_tile_size_out;
 
             // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
-            int cut_height_out = cut_height < vcuts ? 1 : cut_height / vcuts;
+            int cut_height_out = cut_height < pim_config_.vcuts ? 1 : cut_height / pim_config_.vcuts;
             for (int j=0; j<cut_height_out; j++) {
 
                 // It can generate commands for multiple banks per channel simultaneously depending for bank interleaving.
                 int ch = hcut_no * cut_height + vcut_out_no * cut_height_out + j;
-                int k_bound = df == 1 ? 1 : M[i] == 1 || true ? mc : 1;
+                int k_bound = pim_config_.df == 1 ? 1 : M[i] == 1 || true ? pim_config_.mc : 1;
                 for (int k=0; k<k_bound; k++) {
-                    int bk = vcut_no * cut_width + k*(cut_width/mc);
-                    if (df != 1) bk++;
+                    int bk = vcut_no * cut_width + k*(cut_width/pim_config_.mc);
+                    if (pim_config_.df != 1) bk++;
                     int bg = bk / config_.banks_per_group;
                     bk = bk % config_.banks_per_group;
-                    if (df==0) bk += 2;
+                    if (pim_config_.df==0) bk += 2;
                     // building memory address by combining base physical address and BLAS configuration
                     Address addr = Address(ch, 0, bg, bk, base_rows_out[i] + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
                     // Address addr = Address(ch, 0, bg, bk, base_rows_out[i] + col_offset,  col_offset % (config_.columns/config_.BL));
@@ -719,7 +709,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                                 assert(in_cnt[i] == -1);
                                 std::cout<<clk_<<" Output Exhausted: Array"<<i<<". Turn off PIM mode.\n";
                                 in_pim[i] = false;
-                                if (cut_height < vcuts) in_pim[i+1] = false;
+                                if (cut_height < pim_config_.vcuts) in_pim[i+1] = false;
                                 turn_off = true;
                                 for (size_t j = 0; j < in_pim.size(); j++) {
                                     if (in_pim[j]) {
@@ -732,7 +722,7 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
                         }
 
                         output_valid[i]--;
-                        if (cut_height < vcuts) output_valid[i+1]--;
+                        if (cut_height < pim_config_.vcuts) output_valid[i+1]--;
                         // Output Tile Finished
                     }
                 }
