@@ -116,6 +116,19 @@ set_tests_properties(dramsim3_unit PROPERTIES
     LABELS "quick"
 )
 
+find_package(PythonInterp 3 REQUIRED)
+add_test(
+    NAME hbnpu_quick_regression
+    COMMAND ${PYTHON_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/tests/regression/run_regression.py
+            --binary $<TARGET_FILE:dramsim3main>
+            --suite quick
+)
+set_tests_properties(hbnpu_quick_regression PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+
 # We have to use this custome command because there's a bug in cmake
 # that if you do `make test` it doesn't build your updated test files
 # so we're stucking with `make dramsim3test` for now
