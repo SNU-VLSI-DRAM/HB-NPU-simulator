@@ -54,6 +54,28 @@ make -j4
 The build process creates `dramsim3main` and executables in the `build` directory.
 By default, it also creates `libdramsim3.so` shared library in the project root directory.
 
+### Testing
+
+Configure a Debug build with command tracing, build all default targets, and
+run the fast unit and regression checks:
+
+```bash
+cmake -S . -B build -DCMD_TRACE=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j4
+ctest --test-dir build --output-on-failure -L quick
+```
+
+Run the complete matrix, including the longer OPT-2.7B comparison, with:
+
+```bash
+ctest --test-dir build --output-on-failure
+```
+
+Regression comparisons are exact except for floating-point energy fields,
+which use a relative tolerance of `1e-6` plus an absolute tolerance of `1e-9`.
+Ordinary test runs never update goldens. Golden changes must be explicit via
+`tests/regression/run_regression.py --update-golden` and reviewed separately.
+
 ### Reproduce the results from the paper
 
 To run all OPT workloads in our evaluation, enter below command. (We will add the support for other LLMs soon.)
@@ -182,5 +204,4 @@ num_gh_read_cmds              =        1500
     refresh.cc: Added refresh checking process for pausing HB-NPU operations not to be interrupted by refresh.
     timing.cc: Added support for HB-NPU commands.
 ```
-
 

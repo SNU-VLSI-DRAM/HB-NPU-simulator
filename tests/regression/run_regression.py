@@ -125,8 +125,9 @@ def compare_commands(actual, expected):
                 )
 
 
-def compare_value(actual, expected, path):
+def compare_value(actual, expected, path, energy_field=False):
     key = path[-1] if path else ""
+    energy_field = energy_field or "energy" in key
     if path == ["commands"]:
         compare_commands(actual, expected)
         return
@@ -134,15 +135,20 @@ def compare_value(actual, expected, path):
         if set(actual) != set(expected):
             raise AssertionError("key mismatch at " + "/".join(path))
         for child_key in sorted(actual):
-            compare_value(actual[child_key], expected[child_key], path + [child_key])
+            compare_value(
+                actual[child_key], expected[child_key], path + [child_key],
+                energy_field,
+            )
         return
     if isinstance(actual, list) and isinstance(expected, list):
         if len(actual) != len(expected):
             raise AssertionError("length mismatch at " + "/".join(path))
         for index, (actual_item, expected_item) in enumerate(zip(actual, expected)):
-            compare_value(actual_item, expected_item, path + [str(index)])
+            compare_value(
+                actual_item, expected_item, path + [str(index)], energy_field
+            )
         return
-    if "energy" in key and isinstance(actual, (int, float)):
+    if energy_field and isinstance(actual, (int, float)):
         if not energy_close(float(actual), float(expected)):
             raise AssertionError("energy mismatch at " + "/".join(path))
         return

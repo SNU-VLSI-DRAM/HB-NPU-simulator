@@ -1,10 +1,15 @@
 #include "catch.hpp"
 #include "controller.h"
+#include "dram_system.h"
 #include "pim_command_batch.h"
 #include "pim_config.h"
 #include "pim_partition_state.h"
 #include "pim_transaction.h"
 #include "timing.h"
+
+namespace {
+void dummy_pim_callback(uint64_t) {}
+}
 
 namespace dramsim3 {
 class ControllerTestPeer {
@@ -73,6 +78,34 @@ TEST_CASE("PIM partition state defaults are independent", "[pim]") {
     partitions[0].in_act_placed = true;
     REQUIRE(partitions[1].m == 0);
     REQUIRE(partitions[1].in_act_placed == false);
+}
+
+TEST_CASE("zero-mask PIM launch before configuration stays queued", "[pim]") {
+    using namespace dramsim3;
+    Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
+    JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
+                            dummy_pim_callback);
+
+    REQUIRE(dramsys.AddTransaction(0x1));
+    dramsys.ClockTick();
+
+    REQUIRE(dramsys.partitions_.empty());
+    REQUIRE(dramsys.pim_trans_queue_.size() == 1);
+    REQUIRE(dramsys.pim_trans_queue_.front().addr == 0x1);
+}
+
+TEST_CASE("bit-zero-clear PIM launch before configuration stays queued", "[pim]") {
+    using namespace dramsim3;
+    Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
+    JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
+                            dummy_pim_callback);
+
+    REQUIRE(dramsys.AddTransaction(0x5));
+    dramsys.ClockTick();
+
+    REQUIRE(dramsys.partitions_.empty());
+    REQUIRE(dramsys.pim_trans_queue_.size() == 1);
+    REQUIRE(dramsys.pim_trans_queue_.front().addr == 0x5);
 }
 
 TEST_CASE("PIM dataflow config preserves defaults and decoded values", "[pim]") {

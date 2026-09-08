@@ -243,17 +243,17 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             int cuts = pim_config_.vcuts * pim_config_.hcuts;
             bool configured = true;
             for (int i=0; i<cuts; i++) {
-                PimPartitionState& partition = partitions_[i];
-                if ((decoded.launch_mask & (1 << i)) && (partition.m != 0 && partition.n != 0 && partition.k != 0));
+                if ((decoded.launch_mask & (1 << i)) &&
+                    (partitions_[i].m != 0 && partitions_[i].n != 0 &&
+                     partitions_[i].k != 0));
                 else {
                     configured = false;
                 }
             }
             if (configured) {
                 for (int i=0; i<cuts; i++) {
-                    PimPartitionState& partition = partitions_[i];
                     if(decoded.launch_mask & (1 << i))
-                        partition.in_pim = true;
+                        partitions_[i].in_pim = true;
                 }
                 pim_trans_queue_.erase(it);
             }

@@ -70,6 +70,35 @@ class RegressionRunnerTest(unittest.TestCase):
             run_regression.compare_value(
                 {"total_energy": 1.0}, {"total_energy": 1.00001}, [])
 
+    def test_rank_indexed_energy_values_allow_approved_tolerance(self):
+        for field in ("act_stb_energy", "pre_stb_energy", "sref_energy"):
+            with self.subTest(field=field):
+                run_regression.compare_value(
+                    {field: {"0": 195492.01}},
+                    {field: {"0": 195492.0}},
+                    [],
+                )
+
+    def test_rank_indexed_energy_values_reject_outside_tolerance(self):
+        for field in ("act_stb_energy", "pre_stb_energy", "sref_energy"):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(
+                        AssertionError, "energy mismatch at {}/0".format(field)):
+                    run_regression.compare_value(
+                        {field: {"0": 195493.0}},
+                        {field: {"0": 195492.0}},
+                        [],
+                    )
+
+    def test_nested_non_energy_numbers_remain_exact(self):
+        with self.assertRaisesRegex(
+                AssertionError, "mismatch at stats/0/num_cycles"):
+            run_regression.compare_value(
+                {"stats": {"0": {"num_cycles": 4000.0000005}}},
+                {"stats": {"0": {"num_cycles": 4000.0}}},
+                [],
+            )
+
     def test_golden_output_is_byte_stable_and_readable(self):
         value = {"b": 2, "a": {"cycle": 4}}
         with tempfile.TemporaryDirectory() as temp_name:
@@ -189,49 +218,107 @@ print("simulation ended without marker")
                     run_regression.run_quick(Path("unused"), False)
 
     def test_opt27b_manifest_selects_exact_ordered_46_kernel_window(self):
-        cases = run_regression.opt27b_cases()
+        expected = [
+            ("prompt/createQKV", "traces/OPT-2.7B_128_1024_32/prompt/createQKV"),
+            ("prompt/QK", "traces/OPT-2.7B_128_1024_32/prompt/QK"),
+            ("prompt/SV", "traces/OPT-2.7B_128_1024_32/prompt/SV"),
+            ("prompt/Wo", "traces/OPT-2.7B_128_1024_32/prompt/Wo"),
+            ("prompt/L1", "traces/OPT-2.7B_128_1024_32/prompt/L1"),
+            ("prompt/L2", "traces/OPT-2.7B_128_1024_32/prompt/L2"),
+            ("decode/createQKV", "traces/OPT-2.7B_128_1024_32/decode/createQKV"),
+            ("decode/WS/createQKV", "traces/OPT-2.7B_128_1024_32/decode/WS/createQKV"),
+            ("decode/Wo", "traces/OPT-2.7B_128_1024_32/decode/Wo"),
+            ("decode/WS/Wo", "traces/OPT-2.7B_128_1024_32/decode/WS/Wo"),
+            ("decode/L1", "traces/OPT-2.7B_128_1024_32/decode/L1"),
+            ("decode/WS/L1", "traces/OPT-2.7B_128_1024_32/decode/WS/L1"),
+            ("decode/L2", "traces/OPT-2.7B_128_1024_32/decode/L2"),
+            ("decode/WS/L2", "traces/OPT-2.7B_128_1024_32/decode/WS/L2"),
+            ("decode/QKV/QK_0128", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0128"),
+            ("decode/QKV/SV_0128", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0128"),
+            ("decode/QKV/QK_0129", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0129"),
+            ("decode/QKV/SV_0129", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0129"),
+            ("decode/QKV/QK_0130", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0130"),
+            ("decode/QKV/SV_0130", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0130"),
+            ("decode/QKV/QK_0131", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0131"),
+            ("decode/QKV/SV_0131", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0131"),
+            ("decode/QKV/QK_0132", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0132"),
+            ("decode/QKV/SV_0132", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0132"),
+            ("decode/QKV/QK_0133", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0133"),
+            ("decode/QKV/SV_0133", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0133"),
+            ("decode/QKV/QK_0134", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0134"),
+            ("decode/QKV/SV_0134", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0134"),
+            ("decode/QKV/QK_0135", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0135"),
+            ("decode/QKV/SV_0135", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0135"),
+            ("decode/QKV/QK_0136", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0136"),
+            ("decode/QKV/SV_0136", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0136"),
+            ("decode/QKV/QK_0137", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0137"),
+            ("decode/QKV/SV_0137", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0137"),
+            ("decode/QKV/QK_0138", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0138"),
+            ("decode/QKV/SV_0138", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0138"),
+            ("decode/QKV/QK_0139", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0139"),
+            ("decode/QKV/SV_0139", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0139"),
+            ("decode/QKV/QK_0140", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0140"),
+            ("decode/QKV/SV_0140", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0140"),
+            ("decode/QKV/QK_0141", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0141"),
+            ("decode/QKV/SV_0141", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0141"),
+            ("decode/QKV/QK_0142", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0142"),
+            ("decode/QKV/SV_0142", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0142"),
+            ("decode/QKV/QK_0143", "traces/OPT-2.7B_128_1024_32/decode/QKV/QK_0143"),
+            ("decode/QKV/SV_0143", "traces/OPT-2.7B_128_1024_32/decode/QKV/SV_0143"),
+        ]
 
-        self.assertEqual(len(cases), 46)
-        self.assertEqual(
-            [name for name, trace in cases[:14]],
-            [
-                "prompt/createQKV", "prompt/QK", "prompt/SV", "prompt/Wo",
-                "prompt/L1", "prompt/L2", "decode/createQKV",
-                "decode/WS/createQKV", "decode/Wo", "decode/WS/Wo",
-                "decode/L1", "decode/WS/L1", "decode/L2", "decode/WS/L2",
-            ],
-        )
-        self.assertEqual(
-            [name for name, trace in cases[14:18]],
-            ["decode/QKV/QK_0128", "decode/QKV/SV_0128",
-             "decode/QKV/QK_0129", "decode/QKV/SV_0129"],
-        )
-        self.assertEqual(
-            [name for name, trace in cases[-2:]],
-            ["decode/QKV/QK_0143", "decode/QKV/SV_0143"],
-        )
-        self.assertEqual(
-            cases[7][1],
-            run_regression.ROOT / "traces/OPT-2.7B_128_1024_32/decode/WS/createQKV",
-        )
+        actual = [
+            (name, trace.relative_to(run_regression.ROOT).as_posix())
+            for name, trace in run_regression.opt27b_cases()
+        ]
+        self.assertEqual(actual, expected)
 
     def test_long_summary_hashes_canonical_ordered_commands_and_discards_them(self):
         result = regression_result(42)
         result["commands"] = {
-            "1": [{"kind": "act", "cycle": 7}],
-            "0": [{"cycle": 3, "kind": "pre"}],
+            "0": [
+                {
+                    "cycle": 3, "kind": "pre", "channel": 0, "rank": 0,
+                    "bankgroup": 1, "bank": 2, "row": 16, "column": 4,
+                },
+                {
+                    "cycle": 7, "kind": "act", "channel": 0, "rank": 1,
+                    "bankgroup": 3, "bank": 0, "row": 32, "column": 8,
+                },
+            ],
         }
         result["stats"] = {"0": {"total_energy": 1.0}}
 
-        self.assertEqual(run_regression.summarize_long_case(result), {
+        summary = run_regression.summarize_long_case(result)
+        self.assertEqual(summary, {
             "terminated": True,
             "termination_cycle": 42,
             "command_sha256": {
-                "0": "ebef1875d30b2d03b381c5776aedad7ba2b87df65296f3d8f96511e79d44fba8",
-                "1": "c62e5e19ce2fe6a47c0b6c99d902d8586d83edf00c0cf2b6038538d7c10a107e",
+                "0": "a6466bb992be4ea1a0957ca3a06f5cb74f205c5922541489d65bfccdde6d1536",
             },
             "stats": {"0": {"total_energy": 1.0}},
         })
+
+        reversed_result = copy.deepcopy(result)
+        reversed_result["commands"]["0"].reverse()
+        self.assertEqual(
+            run_regression.summarize_long_case(reversed_result)["command_sha256"]["0"],
+            "d156b547b2e25613ff3b84488b228be9510e509dad287a03905185ac44f6daf5",
+        )
+        self.assertNotEqual(
+            summary["command_sha256"]["0"],
+            run_regression.summarize_long_case(reversed_result)["command_sha256"]["0"],
+        )
+
+        reordered_keys = copy.deepcopy(result)
+        reordered_keys["commands"]["0"] = [
+            dict(reversed(list(command.items())))
+            for command in reordered_keys["commands"]["0"]
+        ]
+        self.assertEqual(
+            run_regression.summarize_long_case(reordered_keys)["command_sha256"]["0"],
+            summary["command_sha256"]["0"],
+        )
 
     def test_ordinary_opt27b_comparison_rejects_changes_without_writing_golden(self):
         with tempfile.TemporaryDirectory() as temp_name:

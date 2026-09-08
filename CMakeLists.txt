@@ -101,7 +101,7 @@ set_target_properties(dramsim3main PROPERTIES
 add_library(Catch INTERFACE)
 target_include_directories(Catch INTERFACE ext/headers)
 
-add_executable(dramsim3test EXCLUDE_FROM_ALL
+add_executable(dramsim3test
     tests/test_config.cc
     tests/test_dramsys.cc
     tests/test_hmcsys.cc # IDK somehow this can literally crush your computer
@@ -119,6 +119,16 @@ set_tests_properties(dramsim3_unit PROPERTIES
 )
 
 find_package(PythonInterp 3 REQUIRED)
+add_test(
+    NAME hbnpu_regression_runner_unit
+    COMMAND ${PYTHON_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/regression/test_run_regression.py
+)
+set_tests_properties(hbnpu_regression_runner_unit PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+
 add_test(
     NAME hbnpu_quick_regression
     COMMAND ${PYTHON_EXECUTABLE}
