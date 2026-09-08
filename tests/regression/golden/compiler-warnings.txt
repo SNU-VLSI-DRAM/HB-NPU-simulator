@@ -1,5 +1,5 @@
 warning: comparison of integer expressions of different signedness: ‘int’ and ‘std::vector<dramsim3::Controller*>::size_type’ {aka ‘long unsigned int’} [-Wsign-compare]
-warning: comparison of integer expressions of different signedness: ‘int’ and ‘std::vector<int>::size_type’ {aka ‘long unsigned int’} [-Wsign-compare]
+warning: comparison of integer expressions of different signedness: ‘int’ and ‘std::vector<dramsim3::PimPartitionState>::size_type’ {aka ‘long unsigned int’} [-Wsign-compare]
 warning: comparison of integer expressions of different signedness: ‘std::vector<dramsim3::Command>::size_type’ {aka ‘long unsigned int’} and ‘int’ [-Wsign-compare]
 warning: comparison of integer expressions of different signedness: ‘uint64_t’ {aka ‘long unsigned int’} and ‘__gnu_cxx::__alloc_traits<std::allocator<int>, int>::value_type’ {aka ‘int’} [-Wsign-compare]
 warning: loop variable ‘q’ creates a copy from type ‘const std::vector<dramsim3::Command>’ [-Wrange-loop-construct]
