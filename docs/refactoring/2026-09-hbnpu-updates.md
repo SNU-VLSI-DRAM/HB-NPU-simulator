@@ -1,9 +1,9 @@
 # HB-NPU refactoring, input migration, and channel-command updates
 
-This document summarizes the work on
-`refactor/behavior-preserving-hbnpu`, prepared for integration into local
-`master`. The merge is paused while the original `master` remains the comparison
-reference. The work began at
+This document summarizes the work merged from
+`refactor/behavior-preserving-hbnpu` into local `master`. The original reference
+state remains available as the `baseline/pre-hbnpu-refactor-2026-09` tag. The
+work began at
 `502b5275` and was carried out in three distinct stages. The first stage
 preserved execution behavior; the later stages deliberately changed the input
 format and corrected timing. They should not be treated as one timing-neutral
