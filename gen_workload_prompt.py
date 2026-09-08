@@ -9,7 +9,7 @@ def gen_actual_workload_ws(folder, name, M_tile, al, m, k, n, mc):
     if n < mc:
         return
     fout = open(folder + '/' + name, 'w')
-    fout.write(", ".join(['1', '1', str(M_tile), str(al), str(mc), str(1), '0']) + '\n')
+    fout.write(", ".join([str(M_tile), str(al), str(mc), str(1), '0']) + '\n')
     fout.write(", ".join([str(m), str(k), str(n)]) + '\n')
     fout.close()
 

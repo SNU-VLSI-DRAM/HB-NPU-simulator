@@ -215,13 +215,8 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
     // if countdown is lower than pim delay, pause issuing pim commands until refresh is done over all ranks
     bool wait_refresh = false;
     for (size_t i=0; i<ctrls_.size(); i++) {
-        if (ctrls_[i]->pim_refresh_coming() && pim_config_.vcuts != -1 && pim_config_.hcuts != -1) {
+        if (ctrls_[i]->pim_refresh_coming() && pim_config_.configured) {
             wait_refresh = true;
-            for (int j=0; j<pim_config_.vcuts*pim_config_.hcuts; j++) {
-                partitions_[j].in_act_placed = false;
-                partitions_[j].weight_act_placed = false;
-                partitions_[j].output_act_placed = false;
-            }
             // std::cout<<clk_ << "\tWait Refresh\n";
         }
     }
@@ -240,21 +235,9 @@ void JedecDRAMSystem::ProcessPimTransaction() {
 
         switch (decoded.kind) {
         case PimTransactionKind::START_COMPUTATION: {
-            int cuts = pim_config_.vcuts * pim_config_.hcuts;
-            bool configured = true;
-            for (int i=0; i<cuts; i++) {
-                if ((decoded.launch_mask & (1 << i)) &&
-                    (partitions_[i].m != 0 && partitions_[i].n != 0 &&
-                     partitions_[i].k != 0));
-                else {
-                    configured = false;
-                }
-            }
-            if (configured) {
-                for (int i=0; i<cuts; i++) {
-                    if(decoded.launch_mask & (1 << i))
-                        partitions_[i].in_pim = true;
-                }
+            if (pim_config_.configured && execution_.m != 0 &&
+                execution_.n != 0 && execution_.k != 0) {
+                execution_.in_pim = true;
                 pim_trans_queue_.erase(it);
             }
             for (size_t i=0; i<ctrls_.size(); i++) {
@@ -264,37 +247,28 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             break;
         }
         case PimTransactionKind::LOAD_DATAFLOW_CONFIG: {
-            partitions_.clear();
-
-            pim_config_.LoadLayout(decoded);
-            if (pim_config_.vcuts * pim_config_.hcuts > 1) // TODO
-                for (int i=0; i<ctrls_.size(); i++) {
-                    ctrls_[i]->wr_multitenant = true;
-                }
-
-            pim_config_.LoadTiling(decoded);
-
-            int cuts = pim_config_.vcuts * pim_config_.hcuts;
-            partitions_.assign(cuts, PimPartitionState());
+            pim_config_.Load(decoded);
+            execution_ = PimExecutionState();
 
             pim_trans_queue_.erase(it);
             break;
         }
         case PimTransactionKind::LOAD_WORKLOAD_CONFIG: {
-            PimPartitionState& partition = partitions_[decoded.cut_no];
+            if (!pim_config_.configured) break;
+            PimExecutionState& state = execution_;
             switch(decoded.load_type) {
                 case 0: // M, weight
-                    partition.base_row_weight = decoded.base_row;
-                    partition.m = decoded.dim_value;
+                    state.base_row_weight = decoded.base_row;
+                    state.m = decoded.dim_value;
                     break;
                 case 1: // K, output
-                    partition.base_row_output = decoded.base_row;
+                    state.base_row_output = decoded.base_row;
                     // std::cout<<base_row<<std::endl;
-                    partition.k = decoded.dim_value;
+                    state.k = decoded.dim_value;
                     break;
                 case 2: // N, input
-                    partition.base_row_in = decoded.base_row;
-                    partition.n = decoded.dim_value;
+                    state.base_row_in = decoded.base_row;
+                    state.n = decoded.dim_value;
                     break;
                 default:
                     std::cerr << "Invalid load type!"
@@ -320,409 +294,204 @@ bool JedecDRAMSystem::PimCommandsBlockedByRefresh() const {
     return is_in_ref;
 }
 
+bool JedecDRAMSystem::PendingPimSource(PimSource source) const {
+    for (const auto* controller : ctrls_)
+        if (controller->HasPendingPim(source)) return true;
+    return false;
+}
+
 void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
-    //*** HB-NPU Command Scheduler ***//
-    // We are currently developing multi-tenant workload support in the NPU by partitioning the array and running them independently.
-    // Please ignore these variables (~cut~) for now.
-    int cuts = 0;
-    if (pim_config_.vcuts != -1 && pim_config_.hcuts != -1) cuts = pim_config_.vcuts * pim_config_.hcuts;
-    for (int i=0; i < cuts; i++) {
-        PimPartitionState& partition = partitions_[i];
-        if (!partition.in_pim || is_in_ref) continue;
-
-        int vcut_no = i % pim_config_.vcuts;
-        int cut_height = config_.channels / pim_config_.hcuts;
-        int hcut_no = i / pim_config_.vcuts;
-        int cut_width = config_.banks / pim_config_.vcuts;
-
-        int N_tile_size = 128 / pim_config_.vcuts; // 128 : the number of PEs in a row
-        int N_tile_it = partition.n_it / N_tile_size;
-        int M_tile_it = partition.m_it / pim_config_.m_tile_size;
-        int M_current_tile_size = partition.m < pim_config_.m_tile_size * (M_tile_it + 1) ? partition.m % pim_config_.m_tile_size : pim_config_.m_tile_size;
-        int K_tile_size = std::min(cut_height * 16, partition.k); // 16: the number of PEs supported by a bank's io
-
-
-        int weight_banks_reduce = pim_config_.df==0? 8:16; // Bank Interleaving option for weight loading
-        PimCommandBatch batch;
-
-        bool output_ready = partition.iw_status == 3;
-
-        // std::cout<<partition.iw_status<<"iw_status\n";
-        // Our custom command scheduler changes iw_status value to switch the BLAS functions between loading data into PE array registers and streaming data into the array.
-        // It manages matrix multiplication progress by monitoring and updating the BLAS status and NPU status
-        switch (partition.iw_status) {
-            case 0: { // data loading into PE registers
-                CommandType act_type = CommandType::PIM_ACTIVATE;
-                CommandType read_type = CommandType::GH_READ;
-                CommandType readp_type = CommandType::GH_READ_PRECHARGE;
-
-
-                int N_tile_size_per_bank = std::min(partition.n, (N_tile_size-1)/(cut_width/weight_banks_reduce) + 1);
-                int col_offset = N_tile_it * (N_tile_size_per_bank * ((partition.k-1) / K_tile_size + 1)) + partition.k_tile_it * N_tile_size_per_bank + partition.n_it % N_tile_size; // n_it incremented by N_tile_size when n_it % N_tile_size_per_bank == 0 (but not with N_tile_size)
-                // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
-                for (int j=0; j<cut_height; j++) {
-                    // It can read multiple banks for bank interleaving or only one bank per channel
-                    for (int k=0; k<cut_width/weight_banks_reduce; k++) {
-                        int ch = hcut_no * cut_height + j;
-                        int bk = vcut_no * cut_width + k * weight_banks_reduce;
-                        int bg = bk / config_.banks_per_group;
-                        bk = bk % config_.banks_per_group;
-                        // building memory address by combining base physical address and BLAS configuration
-                        Address addr = Address(ch, 0, bg, bk, partition.base_row_weight + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
-                        uint64_t hex_addr = config_.AddressUnmapping(addr);
-                        // generate read-precharge command if this is the last access to read the tile.
-                        CommandType cmd_type;
-                        bool exit = ((partition.n_it+1) % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || (partition.n_it+1) % N_tile_size != 0));
-                        cmd_type = (addr.column + 1) % std::min(partition.n, 128 / config_.banks * weight_banks_reduce) == 0 || (addr.column + 1) % (config_.columns / config_.BL) == 0 || exit ? readp_type : read_type;
-                        Command cmd = Command(cmd_type, addr, hex_addr);
-                        Command ready_cmd = ctrls_[ch]->GetReadyCommand(cmd, clk_);
-                        // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
-                        // This is to prevent the commands from being sent multiple times.
-                        if (!ready_cmd.IsValid()) {
-                            batch.ClearWeight();
-                            break;
-                        }
-                        else {
-                            batch.AddWeight(ready_cmd);
-                            if (batch.weight_commands.begin()->cmd_type != ready_cmd.cmd_type) {
-                                batch.ClearWeight();
-                                break;
-                            }
-                        }
-                    }
-                    if (batch.weight_commands.empty()) break;
-                }
-
-
-                if (batch.weight_commands.empty()) break;
-                // Check if the activation command was already sent.
-                if (batch.weight_commands.begin()->cmd_type == act_type) {
-                    if (partition.weight_act_placed || wait_refresh) {
-                        batch.ClearWeight();
-                        break;
-                    }
-                    else
-                        partition.weight_act_placed = true;
-                }
-                //
-                else {
-                    if (batch.weight_commands.begin()->cmd_type == readp_type) {
-                        partition.weight_act_placed = false;
-                    }
-                    if (pim_config_.df == 1 && batch.weight_commands.begin()->cmd_type == CommandType::PRECHARGE) {
-                        break;
-                    }
-
-                    // increment BLAS iterators
-                    partition.n_it++;
-                    if (partition.n_it % N_tile_size_per_bank == 0 && (N_tile_size == N_tile_size_per_bank || partition.n_it % N_tile_size != 0)) {
-                        partition.n_it = N_tile_size * N_tile_it;
-                        partition.iw_status++;
-                    }
-                }
-
-
-                break;
-            }
-            case 1: { // Finished data loading
-                // wait npu signals
-                // For non-multi-tenant cases, advance to next stage immediately.
-                partition.iw_status++;
-                partition.vpu_cnt = 1;
-                if (cuts == 1) { //partition.n==1) { //TODO support for MT
-                    for (int j=0; j<partitions_.size(); j++) {
-                        if (partitions_[j].iw_status == 0 || partitions_[j].iw_status == 3) {
-                            partition.iw_status--;
-                            break;
-                        }
-                    }
-                }
-                break;
-            }
-            case 2: { // Streaming data into PE array
-                CommandType act_type = CommandType::PIM_ACTIVATE;
-                // Weight stationary dataflow opts to use Global HB, while TS-GEMM/GEMV dataflow uses Local HB.
-                CommandType read_type = pim_config_.df == 0 ? CommandType::GH_READ : CommandType::LH_READ;
-                CommandType readp_type = pim_config_.df == 0 ? CommandType::GH_READ_PRECHARGE : CommandType::LH_READ_PRECHARGE;
-                partition.vpu_cnt--;
-                partition.vpu_cnt = std::max(0, partition.vpu_cnt);
-
-                int col_offset = M_tile_it * (pim_config_.m_tile_size * ((partition.k-1) / K_tile_size + 1)) + partition.k_tile_it * M_current_tile_size + partition.m_it % pim_config_.m_tile_size;
-                bool mixed = false;
-                Command mixed_cmd;
-                // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
-                for (int j=0; j<cut_height; j++) {
-                    // It can generate commands for multiple banks per channel simultaneously depending on the dataflow configuration.
-                    for (int k=0; k<pim_config_.mc; k++) {
-
-                        int ch = hcut_no * cut_height + j;
-                        int bk = vcut_no * cut_width + k*(cut_width/pim_config_.mc);
-                        if (pim_config_.df==0) bk++;
-                        int bg = bk / config_.banks_per_group;
-                        bk = bk % config_.banks_per_group;
-
-                        // building memory address by combining base physical address and BLAS configuration
-                        Address addr = Address(ch, 0, bg, bk, partition.base_row_in + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
-                        uint64_t hex_addr = config_.AddressUnmapping(addr);
-                        bool close = partition.m_it + 1 == partition.m; // prevent closing between tiles
-                        bool close2 = (partition.k_tile_it+1) * K_tile_size >= partition.k; // leave open in WS since batch size is too small in LLMs
-                        bool close3 = pim_config_.df==0?close2 && close:close;
-                        // generate read-precharge command if this is the last access to read the tile.
-                        CommandType cmd_type = close3 || addr.column == config_.columns / config_.BL - 1 ? readp_type : read_type;
-                        Command cmd = Command(cmd_type, addr, hex_addr);
-                        Command ready_cmd = ctrls_[ch]->GetReadyCommand(cmd, clk_);
-                        // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
-                        // This is to prevent the commands from being sent multiple times.
-                        if (!ready_cmd.IsValid()) {
-                            batch.ClearInput();
-                            break;
-                        }
-                        else {
-                            batch.AddInput(ready_cmd, clk_);
-                            if (batch.input_commands.begin()->cmd_type != ready_cmd.cmd_type) {
-                                if (mixed) {
-                                    if (mixed_cmd.cmd_type != batch.input_commands.begin()->cmd_type && mixed_cmd.cmd_type != ready_cmd.cmd_type) {
-                                        std::cout<<"3 ops mixed: "<<mixed_cmd<<*batch.input_commands.begin()<<ready_cmd<<std::endl;
-                                    }
-                                }
-                                else {
-                                    mixed = true;
-                                    mixed_cmd = ready_cmd;
-                                }
-
-                            }
-                        }
-                    }
-                }
-                if(cuts > 1 && batch.input_commands.size() != cut_height) {
-                    batch.ClearInput();
-                    break;
-                }
-                if (mixed) {
-                    size_t input_index = 0;
-                    for (auto it = batch.input_commands.begin(); it != batch.input_commands.end();) {
-                        if (it->cmd_type == read_type || it->cmd_type == readp_type) {
-                            it = batch.input_commands.erase(it);
-                            batch.input_release_times.erase(batch.input_release_times.begin() + input_index);
-                        }
-                        else {
-                            it++;
-                            input_index++;
-                        }
-                    }
-                }
-
-                if (batch.input_commands.empty()) break;
-
-                // Check if the activation command was already sent.
-                if (batch.input_commands.begin()->cmd_type == act_type) {
-                    if ((partition.in_act_placed) || wait_refresh) {
-                        batch.ClearInput();
-                        break;
-                    }
-                    else{
-                        partition.in_act_placed = true;
-
-                    }
-                }
-                else {
-
-                    if (batch.input_commands.begin()->cmd_type == readp_type) {
-                        partition.in_act_placed = false;
-                    }
-                    if (partition.vpu_cnt!=0){
-                        batch.ClearInput();
-                        break;
-                    }
-
-                    assert(pim_config_.m_tile_size > 128/pim_config_.vcuts);
-
-                    // Update NPU status. Countdown the operation delay.
-                    if ((partition.k_tile_it+1) * K_tile_size >= partition.k && partition.m_it % pim_config_.m_tile_size == 0) {
-                        partition.out_cnt = std::max(1, config_.tCCD_L * (3 + 16) - config_.tRCDWR);
-                    }
-
-
-                    // Increment Iterators
-                    partition.m_it++;
-                    if (partition.m_it % pim_config_.m_tile_size == 0 || partition.m_it == partition.m) {
-                        partition.in_cnt = std::max(1, config_.tCCD_L * std::max(128/(pim_config_.vcuts*pim_config_.mc), 16) - config_.tRCDRD);
-                        partition.iw_status++;
-                        partition.m_it = pim_config_.m_tile_size * M_tile_it;
-                        partition.k_tile_it++;
-
-                        if (partition.k_tile_it * K_tile_size >= partition.k) {
-                            // partition.out_cnt = 3;
-                            partition.k_tile_it = 0;
-                            partition.n_it = N_tile_size * (N_tile_it+1);
-                            if (partition.n_it >= partition.n) {
-                                partition.n_it = 0;
-                                partition.m_it = pim_config_.m_tile_size * (M_tile_it + 1);
-                                if (partition.m_it >= partition.m) {
-                                    std::cout<<clk_<<" End of Computation "<<i<<std::endl;
-                                    partition.in_cnt = -1;
-                                }
-                            }
-                        }
-                    }
-                }
-                break;
-            }
-            case 3: {// Finished input
-                // Lookup NPU status
-                // Wait until PE array is available for loading a new tile.
-                if (partition.in_cnt == -1) break;
-                else {
-
-                    partition.in_cnt = std::max(0, partition.in_cnt - 1);
-                    if (partition.in_cnt == 0 && partition.output_valid == 0)
-                        partition.iw_status = 0;
-                    break;
-                }
-                break;
-            }
-            default: {
-                break;
-            }
+    if (!pim_config_.configured || !execution_.in_pim || is_in_ref) return;
+    PimExecutionState& state = execution_;
+    const int N_tile_size = 128;
+    const int K_tile_size = std::min(config_.channels * 16, state.k);
+    const int array_period = pim_config_.df == 0 ? config_.tCCD_S : config_.tCCD_L;
+    const int weight_banks_reduce = pim_config_.df == 0 ? 8 : 16;
+    const int N_tile_size_per_bank = std::min(state.n,
+        (N_tile_size-1)/(config_.banks/weight_banks_reduce)+1);
+    const bool output_ready = state.iw_status == 3;
+    PimCommandBatch batch;
+    auto add_vector = [&](PimSource source, const std::vector<Command>& commands) {
+        if (commands.empty()) return;
+        PimOperation operation(commands.front(),clk_);
+        if (operation.IsLocal()) {
+            operation.commands = commands;
+            batch.Add(source,operation);
+        } else {
+            for (const auto& cmd : commands) batch.Add(source,PimOperation(cmd,clk_));
         }
+    };
 
-
-
-        // Update NPU status
-        if (partition.out_cnt == 0) partition.output_valid++;
-        if (partition.out_cnt != -1) partition.out_cnt--;
-
-
-        // Writing Output from NPU to DRAM
-        // Command Scheduler lookups the NPU status to check if the output data is ready to be sent to DRAM.
-        bool out_enable = cut_height / pim_config_.vcuts > 0 || vcut_no % 2 == 0;
-        if (partition.output_valid > 0 && output_ready && out_enable) {
-            int vcut_out_no = partition.m == 1 ? vcut_no : pim_config_.vcuts == 16 ? vcut_no / 2 : (vcut_no + partition.n_out_tile_it) % pim_config_.vcuts; // relates to channel number
-            int M_tile_size_out = pim_config_.df == 1 ? (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
-            int M_out_tile_it = partition.m_out_it / M_tile_size_out;
-            int M_out = pim_config_.df == 1 ? std::max(1, partition.m*pim_config_.mcf / 128) : partition.m;
-            int M_out_current_tile_size = M_out < M_tile_size_out * (M_out_tile_it + 1) ? M_out % M_tile_size_out : M_tile_size_out;
-            int N_out = pim_config_.df == 1 ? 128 : partition.n;
-            int N_tile_size_out = pim_config_.df == 1 ? 128 : N_tile_size;
-            int N_tile_num = (partition.n-1) / N_tile_size_out + 1;
-            int N_tile_num_ch = (N_tile_num) / pim_config_.vcuts; // varies by channels to be accessed
-            N_tile_num_ch += N_tile_num % pim_config_.vcuts > partition.n_out_tile_it % pim_config_.vcuts ? 1 : 0;
-            int N_tile_it_ch = partition.n_out_tile_it / pim_config_.vcuts;
-            int col_offset = M_out_tile_it * (M_tile_size_out * N_tile_num_ch) + N_tile_it_ch * M_out_current_tile_size + partition.m_out_it % M_tile_size_out;
-
-            // Scheduler generates the commands for a data vector, divided into multiple channels and sends them to command queues in the corresponding channel controllers.
-            int cut_height_out = cut_height < pim_config_.vcuts ? 1 : cut_height / pim_config_.vcuts;
-            for (int j=0; j<cut_height_out; j++) {
-
-                // It can generate commands for multiple banks per channel simultaneously depending for bank interleaving.
-                int ch = hcut_no * cut_height + vcut_out_no * cut_height_out + j;
-                int k_bound = pim_config_.df == 1 ? 1 : partition.m == 1 || true ? pim_config_.mc : 1;
-                for (int k=0; k<k_bound; k++) {
-                    int bk = vcut_no * cut_width + k*(cut_width/pim_config_.mc);
-                    if (pim_config_.df != 1) bk++;
-                    int bg = bk / config_.banks_per_group;
-                    bk = bk % config_.banks_per_group;
-                    if (pim_config_.df==0) bk += 2;
-                    // building memory address by combining base physical address and BLAS configuration
-                    Address addr = Address(ch, 0, bg, bk, partition.base_row_output + col_offset/(config_.columns/config_.BL),  col_offset % (config_.columns/config_.BL));
-                    // Address addr = Address(ch, 0, bg, bk, partition.base_row_output + col_offset,  col_offset % (config_.columns/config_.BL));
-                    uint64_t hex_addr = config_.AddressUnmapping(addr);
-                    // generate write-precharge command if this is the last access to write the output tile.
-                    bool close = partition.m_out_it + 1 == M_out;
-                    CommandType cmd_type = close || addr.column == config_.columns / config_.BL - 1 ? CommandType::PIM_WRITE_PRECHARGE : CommandType::PIM_WRITE;
-                    Command cmd = Command(cmd_type, addr, hex_addr);
-                    Command ready_cmd = ctrls_[ch]->GetReadyCommand(cmd, clk_);
-
-                    // If a command cannot be executed in some channels due to timing constraints, flush the commands going to other channels and try again later.
-                    // This is to prevent the commands from being sent multiple times.
-                    if (!ready_cmd.IsValid()) {
-                        batch.ClearOutput();
-                        break;
-                    }
-                    else {
-                        batch.AddOutput(ready_cmd);
-                        if (batch.output_commands.begin()->cmd_type != ready_cmd.cmd_type) {
-                            batch.ClearOutput();
-                            break;
-                        }
-                    }
-                }
-                if (batch.output_commands.empty()) break;
-            }
-
-            // Check if the activation command was already sent.
-            if (!batch.output_commands.empty()) {
-                if (batch.output_commands.begin()->cmd_type == CommandType::PIM_ACTIVATE) {
-                    if (partition.output_act_placed || wait_refresh) {
-                        batch.ClearOutput();
-                    }
-                    else {
-                        partition.output_act_placed = true;
-                    }
-                }
-                else {
-                    if (batch.output_commands.begin()->cmd_type == CommandType::PIM_WRITE_PRECHARGE) {
-                        partition.output_act_placed = false;
-                    }
-
-                    // Increment Iterators
-                    partition.m_out_it++;
-                    if (partition.m_out_it % M_tile_size_out == 0 || partition.m_out_it == M_out) {
-                        partition.m_out_it = M_tile_size_out * M_out_tile_it;
-                        partition.n_out_tile_it++;
-                        if (partition.n_out_tile_it * N_tile_size_out >= N_out) {
-                            partition.n_out_tile_it = 0;
-                            partition.m_out_it = M_tile_size_out * (M_out_tile_it+1);
-                            if (partition.m_out_it >= M_out) {
-                                assert(partition.in_cnt == -1);
-                                std::cout<<clk_<<" Output Exhausted: Array"<<i<<". Turn off PIM mode.\n";
-                                partition.in_pim = false;
-                                if (cut_height < pim_config_.vcuts) partitions_[i+1].in_pim = false;
-                                turn_off = true;
-                                for (size_t j = 0; j < partitions_.size(); j++) {
-                                    if (partitions_[j].in_pim) {
-                                        turn_off = false;
-                                    }
-
-                                }
-                            }
-
-                        }
-
-                        partition.output_valid--;
-                        if (cut_height < pim_config_.vcuts) partitions_[i+1].output_valid--;
-                        // Output Tile Finished
-                    }
+    switch (state.iw_status) {
+        case 0: {
+            // Completion means every addressed bank issued its data command,
+            // not merely that the vector was accepted or activated.
+            if (state.weight_pending && !PendingPimSource(PimSource::WEIGHT)) {
+                state.weight_pending = false;
+                int N_tile_it = state.n_it/N_tile_size;
+                ++state.n_it;
+                if (state.n_it % N_tile_size_per_bank == 0 &&
+                    (N_tile_size == N_tile_size_per_bank || state.n_it % N_tile_size != 0)) {
+                    state.n_it = N_tile_size*N_tile_it;
+                    ++state.iw_status;
                 }
             }
-
+            if (state.iw_status != 0 || state.weight_pending || wait_refresh) break;
+            int N_tile_it = state.n_it/N_tile_size;
+            int col_offset = N_tile_it*(N_tile_size_per_bank*((state.k-1)/K_tile_size+1)) +
+                             state.k_tile_it*N_tile_size_per_bank + state.n_it%N_tile_size;
+            for (int ch=0; ch<config_.channels; ++ch) {
+                std::vector<Command> commands;
+                for (int k=0; k<config_.banks/weight_banks_reduce; ++k) {
+                    int bank = k*weight_banks_reduce;
+                    Address addr(ch,0,bank/config_.banks_per_group,bank%config_.banks_per_group,
+                        state.base_row_weight+col_offset/(config_.columns/config_.BL),
+                        col_offset%(config_.columns/config_.BL));
+                    bool exit = (state.n_it+1)%N_tile_size_per_bank == 0 &&
+                        (N_tile_size == N_tile_size_per_bank || (state.n_it+1)%N_tile_size != 0);
+                    bool close = (addr.column+1)%std::min(state.n,128/config_.banks*weight_banks_reduce)==0 ||
+                                 (addr.column+1)%(config_.columns/config_.BL)==0 || exit;
+                    commands.emplace_back(close ? CommandType::GH_READ_PRECHARGE : CommandType::GH_READ,
+                                          addr,config_.AddressUnmapping(addr));
+                }
+                add_vector(PimSource::WEIGHT,commands);
+            }
+            state.weight_pending = true;
+            break;
         }
-
-        // Finally the scheduler sends the aggregated commands to channel controllers by pushing them into custom command queues, which are managed in-order.
-        DispatchCommands(batch);
-
+        case 1:
+            ++state.iw_status;
+            state.vpu_cnt = 1;
+            break;
+        case 2: {
+            state.vpu_cnt = std::max(0,state.vpu_cnt-1);
+            if (state.input_pending && !PendingPimSource(PimSource::INPUT)) {
+                state.input_pending = false;
+                int M_tile_it = state.m_it/pim_config_.m_tile_size;
+                int N_tile_it = state.n_it/N_tile_size;
+                // Retain the approved array geometry and activation overlap.
+                // Trigger these counters on completed data vectors, never PRE.
+                if ((state.k_tile_it+1)*K_tile_size >= state.k &&
+                    state.m_it%pim_config_.m_tile_size == 0)
+                    state.out_cnt = std::max(1,array_period*(3+16)-config_.tRCDWR);
+                ++state.m_it;
+                if (state.m_it%pim_config_.m_tile_size == 0 || state.m_it == state.m) {
+                    state.in_cnt = std::max(1,array_period*std::max(128/pim_config_.mc,16)-config_.tRCDRD);
+                    ++state.iw_status;
+                    state.m_it = pim_config_.m_tile_size*M_tile_it;
+                    ++state.k_tile_it;
+                    if (state.k_tile_it*K_tile_size >= state.k) {
+                        state.k_tile_it = 0;
+                        state.n_it = N_tile_size*(N_tile_it+1);
+                        if (state.n_it >= state.n) {
+                            state.n_it = 0;
+                            state.m_it = pim_config_.m_tile_size*(M_tile_it+1);
+                            if (state.m_it >= state.m) {
+                                std::cout << clk_ << " End of Computation 0" << std::endl;
+                                state.in_cnt = -1;
+                            }
+                        }
+                    }
+                }
+            }
+            if (state.iw_status != 2 || state.input_pending || wait_refresh || state.vpu_cnt) break;
+            int M_tile_it = state.m_it/pim_config_.m_tile_size;
+            int M_current_tile_size = state.m < pim_config_.m_tile_size*(M_tile_it+1) ?
+                                      state.m%pim_config_.m_tile_size : pim_config_.m_tile_size;
+            int col_offset = M_tile_it*(pim_config_.m_tile_size*((state.k-1)/K_tile_size+1)) +
+                             state.k_tile_it*M_current_tile_size + state.m_it%pim_config_.m_tile_size;
+            for (int ch=0; ch<config_.channels; ++ch) {
+                std::vector<Command> commands;
+                for (int k=0; k<pim_config_.mc; ++k) {
+                    int bank = k*(config_.banks/pim_config_.mc) + (pim_config_.df == 0 ? 1 : 0);
+                    Address addr(ch,0,bank/config_.banks_per_group,bank%config_.banks_per_group,
+                        state.base_row_in+col_offset/(config_.columns/config_.BL),
+                        col_offset%(config_.columns/config_.BL));
+                    bool close = state.m_it+1 == state.m;
+                    if (pim_config_.df == 0) close &= (state.k_tile_it+1)*K_tile_size >= state.k;
+                    close |= addr.column == config_.columns/config_.BL-1;
+                    CommandType type = pim_config_.df == 0 ?
+                        (close ? CommandType::GH_READ_PRECHARGE : CommandType::GH_READ) :
+                        (close ? CommandType::LH_READ_PRECHARGE : CommandType::LH_READ);
+                    commands.emplace_back(type,addr,config_.AddressUnmapping(addr));
+                }
+                add_vector(PimSource::INPUT,commands);
+            }
+            state.input_pending = true;
+            break;
+        }
+        case 3:
+            if (state.in_cnt != -1) {
+                state.in_cnt = std::max(0,state.in_cnt-1);
+                if (state.in_cnt == 0 && state.output_valid == 0) state.iw_status = 0;
+            }
+            break;
+        default: break;
     }
 
+    if (state.out_cnt == 0) ++state.output_valid;
+    if (state.out_cnt != -1) --state.out_cnt;
 
-
-
+    if (state.output_valid > 0 && output_ready) {
+        const int M_tile_size_out = pim_config_.df == 1 ?
+            (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
+        const int M_out = pim_config_.df == 1 ? std::max(1,state.m*pim_config_.mcf/128) : state.m;
+        const int N_out = pim_config_.df == 1 ? 128 : state.n;
+        const int N_tile_size_out = 128;
+        const int N_tile_num = (state.n-1)/N_tile_size_out+1;
+        if (state.output_pending && !PendingPimSource(PimSource::OUTPUT)) {
+            state.output_pending = false;
+            int M_out_tile_it = state.m_out_it/M_tile_size_out;
+            ++state.m_out_it;
+            if (state.m_out_it%M_tile_size_out == 0 || state.m_out_it == M_out) {
+                state.m_out_it = M_tile_size_out*M_out_tile_it;
+                ++state.n_out_tile_it;
+                if (state.n_out_tile_it*N_tile_size_out >= N_out) {
+                    state.n_out_tile_it = 0;
+                    state.m_out_it = M_tile_size_out*(M_out_tile_it+1);
+                    if (state.m_out_it >= M_out) {
+                        assert(state.in_cnt == -1);
+                        assert(!PendingPimSource(PimSource::INPUT) && !PendingPimSource(PimSource::WEIGHT));
+                        std::cout << clk_ << " Output Exhausted: Array0. Turn off PIM mode.\n";
+                        state.in_pim = false;
+                        turn_off = true;
+                    }
+                }
+                --state.output_valid;
+            }
+        }
+        if (state.in_pim && state.output_valid > 0 && !state.output_pending && !wait_refresh) {
+            int M_out_tile_it = state.m_out_it/M_tile_size_out;
+            int M_out_current_tile_size = M_out < M_tile_size_out*(M_out_tile_it+1) ?
+                M_out%M_tile_size_out : M_tile_size_out;
+            int col_offset = M_out_tile_it*(M_tile_size_out*N_tile_num) +
+                state.n_out_tile_it*M_out_current_tile_size + state.m_out_it%M_tile_size_out;
+            for (int ch=0; ch<config_.channels; ++ch) {
+                std::vector<Command> commands;
+                int count = pim_config_.df == 1 ? 1 : pim_config_.mc;
+                for (int k=0; k<count; ++k) {
+                    int bank = k*(config_.banks/pim_config_.mc) + (pim_config_.df == 0 ? 1 : 0);
+                    int group = bank/config_.banks_per_group;
+                    bank = bank%config_.banks_per_group + (pim_config_.df == 0 ? 2 : 0);
+                    Address addr(ch,0,group,bank,
+                        state.base_row_output+col_offset/(config_.columns/config_.BL),
+                        col_offset%(config_.columns/config_.BL));
+                    bool close = state.m_out_it+1 == M_out || addr.column == config_.columns/config_.BL-1;
+                    commands.emplace_back(close ? CommandType::PIM_WRITE_PRECHARGE : CommandType::PIM_WRITE,
+                                          addr,config_.AddressUnmapping(addr));
+                }
+                add_vector(PimSource::OUTPUT,commands);
+            }
+            state.output_pending = true;
+        }
+    }
+    DispatchCommands(batch);
 }
 
 void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
-    for (auto& command: batch.weight_commands) {
-       // std::cout<<clk_<<" "<<command<<std::endl;
-        ctrls_[command.Channel()]->EnqueueWeightCommands(
-            std::vector<Command>(1, command));
-    }
-    for (size_t i = 0; i < batch.input_commands.size(); i++) {
-        const Command& command = batch.input_commands[i];
-        ctrls_[command.Channel()]->EnqueueInputCommands(
-            std::vector<Command>(1, command),
-            std::vector<int>(1, batch.input_release_times[i]));
-    }
-    for (auto& command: batch.output_commands) {
-        ctrls_[command.Channel()]->EnqueueOutputCommands(
-            std::vector<Command>(1, command));
+    for (const auto& item : batch.operations) {
+        const auto& operation = item.second;
+        ctrls_[operation.commands.front().Channel()]->EnqueuePimOperation(item.first,operation);
     }
 }
 

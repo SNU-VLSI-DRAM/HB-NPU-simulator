@@ -21,6 +21,36 @@ If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.
 
 ```
 
+## Refactoring and timing updates
+
+The latest updates separate kernel configuration, execution state, and logical
+channel operations; remove obsolete spatial-cut fields from both code and input
+formats; and correct GH read/write interleaving and gang activation timing.
+The initial refactor preserved behavior, while the subsequent format migration
+and timing fixes are intentional compatibility changes.
+
+See the [complete update and migration overview](docs/refactoring/2026-09-hbnpu-updates.md)
+for the architecture/file map, validation results, performance comparisons, and
+remaining limitations. Old external traces must be regenerated before use.
+
+## HB-NPU streaming clocks
+
+With the supplied `tCK=1 ns`, `tCCD_S=1`, and `tCCD_L=2` configuration:
+
+- **LH streaming:** bank-level I/O, array period **2 ns (500 MHz)**.
+- **GH streaming:** shared global I/O, array period **1 ns (1 GHz)**.
+  Prefill/weight-stationary workloads use `mcf=2, ucf=1` to alternate two banks:
+  `A@t, B@(t+1 ns), A@(t+2 ns), B@(t+3 ns)` for both GH reads and writes.
+
+The controller issues at most one logical PIM command per channel per cycle.
+GH reads and writes share the global-I/O slot, including auto-precharge variants.
+LH operations broadcast to all banks; `GANG_ACT`/`GANG_PRE` operate on four banks
+simultaneously. A gang activation consumes four slots in the rank's `tFAW`
+window. PIM activations intentionally ignore `tRRD`; normal DRAM timing is unchanged.
+Independent channels and the bank effects of one LH broadcast remain parallel.
+`in_cnt` and `out_cnt` use the streaming dataflow's array period: `tCCD_S` for
+GH, `tCCD_L` for LH. See [timing details and validation](docs/gh-streaming-timing.md).
+
 ## Building and running the simulator
 
 This simulator has been built based on DRAMsim3.
@@ -91,6 +121,14 @@ python3 run_demo.py -m OPT-66B -i 1024 -o 128 -b 128
 You can check the detailed results reported to ```result.xlsx```.
 
 ### Creating new trace files and workloads
+The simulator now uses a single-array workload/trace format. Workload headers
+contain `tile_M, post_delay, mcf, ucf, df`; the old cut fields and partition
+selection bits have been removed. Checked-in workloads and traces are migrated.
+**Old external traces are incompatible and must be regenerated** with the
+updated workload generators and `gen_LLM_trace.py`. Removing the two header
+fields alone does not convert an existing trace. See the
+[workload and trace format](docs/pim-trace-format.md) for the new bit layout.
+
 You can generate the LLM trace files by running ```gen_LLM_trace.py```. 
 ```bash
 # generate traces for OPT-2.7B with input tokens 1024, output tokens 128, and batch size 128
@@ -204,4 +242,3 @@ num_gh_read_cmds              =        1500
     refresh.cc: Added refresh checking process for pausing HB-NPU operations not to be interrupted by refresh.
     timing.cc: Added support for HB-NPU commands.
 ```
-

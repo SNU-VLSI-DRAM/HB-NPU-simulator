@@ -181,25 +181,26 @@ Timing::Timing(const Config& config)
             {CommandType::READ_PRECHARGE, write_to_read_o},
             {CommandType::WRITE_PRECHARGE, write_to_write_o}};
 
+    const int pim_bank_cadence = std::max(config.burst_cycle, config.tCCD_L);
     // command LH_READ
     same_bank[static_cast<int>(CommandType::LH_READ)] =
         std::vector<std::pair<CommandType, int> >{
-            {CommandType::LH_READ, read_to_read_s},
-            {CommandType::GH_READ, read_to_read_s},
+            {CommandType::LH_READ, pim_bank_cadence},
+            {CommandType::GH_READ, pim_bank_cadence},
             {CommandType::PIM_WRITE, read_to_write},
-            {CommandType::LH_READ_PRECHARGE, read_to_read_s},
-            {CommandType::GH_READ_PRECHARGE, read_to_read_s},
+            {CommandType::LH_READ_PRECHARGE, pim_bank_cadence},
+            {CommandType::GH_READ_PRECHARGE, pim_bank_cadence},
             {CommandType::PIM_WRITE_PRECHARGE, read_to_write},
             {CommandType::PRECHARGE, read_to_precharge}};
 
     // command GH_READ
     same_bank[static_cast<int>(CommandType::GH_READ)] =
         std::vector<std::pair<CommandType, int> >{
-            {CommandType::LH_READ, read_to_read_s},
-            {CommandType::GH_READ, read_to_read_s},
+            {CommandType::LH_READ, pim_bank_cadence},
+            {CommandType::GH_READ, pim_bank_cadence},
             {CommandType::PIM_WRITE, read_to_write},
-            {CommandType::LH_READ_PRECHARGE, read_to_read_s},
-            {CommandType::GH_READ_PRECHARGE, read_to_read_s},
+            {CommandType::LH_READ_PRECHARGE, pim_bank_cadence},
+            {CommandType::GH_READ_PRECHARGE, pim_bank_cadence},
             {CommandType::PIM_WRITE_PRECHARGE, read_to_write},
             {CommandType::PRECHARGE, read_to_precharge}};
 
@@ -208,10 +209,10 @@ Timing::Timing(const Config& config)
         std::vector<std::pair<CommandType, int> >{
             {CommandType::LH_READ, write_to_read_s}, // TODO
             {CommandType::GH_READ, write_to_read_s}, // TODO
-            {CommandType::PIM_WRITE, write_to_write_s},
+            {CommandType::PIM_WRITE, pim_bank_cadence},
             {CommandType::LH_READ_PRECHARGE, write_to_read_l}, // TODO
             {CommandType::GH_READ_PRECHARGE, write_to_read_l}, // TODO
-            {CommandType::PIM_WRITE_PRECHARGE, write_to_write_s},
+            {CommandType::PIM_WRITE_PRECHARGE, pim_bank_cadence},
             {CommandType::PRECHARGE, write_to_precharge}}; // TODO
 
     // command LH_READ_PRECHARGE

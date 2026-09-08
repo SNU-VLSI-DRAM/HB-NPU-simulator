@@ -1,9 +1,16 @@
 #include "controller.h"
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 
 namespace dramsim3 {
+namespace {
+bool IsGlobalRead(const Command& cmd) {
+    return cmd.cmd_type == CommandType::GH_READ ||
+           cmd.cmd_type == CommandType::GH_READ_PRECHARGE;
+}
+}  // namespace
 
 #ifdef THERMAL
 Controller::Controller(int channel, const Config &config, const Timing &timing,
@@ -39,6 +46,8 @@ Controller::Controller(int channel, const Config &config, const Timing &timing)
                                   std::to_string(channel_id_) + "cmd.trace";
     // std::cout << "Command Trace write to " << trace_file_name << std::endl;
     cmd_trace_.open(trace_file_name, std::ofstream::out);
+    pim_trace_.open(config_.output_prefix + "ch_" +
+                    std::to_string(channel_id_) + "pim.trace", std::ofstream::out);
 #endif  // CMD_TRACE
 }
 
@@ -63,128 +72,127 @@ std::pair<uint64_t, int> Controller::ReturnDoneTrans(uint64_t clk) {
 }
 
 Command Controller::GetReadyCommand(Command& cmd, uint64_t clk) {
-    return channel_state_.GetReadyCommand(cmd, clk);
+    Command ready = channel_state_.GetReadyCommand(cmd, clk);
+    if ((IsGlobalRead(ready) || ready.cmd_type == CommandType::PIM_WRITE ||
+         ready.cmd_type == CommandType::PIM_WRITE_PRECHARGE) && clk < next_global_io_cycle_)
+        return Command();
+    return ready;
+}
+
+Command Controller::GetReadyPimRead(Command& cmd, uint64_t clk, int bank_slot) {
+    Command ready = GetReadyCommand(cmd, clk);
+    if (!ready.IsValid() && IsGlobalRead(cmd) && bank_slot > 0) {
+        // A bank pair is submitted together but consumes successive GH slots.
+        // Probe the later slot so staggered same-bank timing does not insert
+        // a bubble between pairs. Only reads may be queued using lookahead:
+        // activation/precharge remain governed by current-cycle readiness.
+        Command later = GetReadyCommand(
+            cmd, clk + bank_slot * std::max(1, config_.tCCD_S));
+        if (IsGlobalRead(later)) return later;
+    }
+    // The controller rechecks every queued command at its actual issue cycle.
+    return ready;
 }
 
 bool Controller::pim_refresh_coming() {
     return refresh_.pim_refresh_coming();
 }
 
-void Controller::EnqueueWeightCommands(const std::vector<Command>& commands) {
-    rd_w_cmds_.insert(rd_w_cmds_.end(), commands.begin(), commands.end());
+void Controller::EnqueuePimOperation(PimSource source, const PimOperation& operation) {
+    operation.Validate(config_);
+    if (operation.commands.front().Channel() != channel_id_)
+        throw std::invalid_argument("PIM operation submitted to wrong channel");
+    auto& queue = source == PimSource::WEIGHT ? rd_w_cmds_ :
+                  source == PimSource::INPUT ? rd_in_cmds_ : wr_cmds_;
+    queue.push_back(operation);
+    if (source == PimSource::INPUT) release_time.push_back(operation.release_cycle);
 }
 
-void Controller::EnqueueInputCommands(
-    const std::vector<Command>& commands,
-    const std::vector<int>& release_times) {
-    rd_in_cmds_.insert(rd_in_cmds_.end(), commands.begin(), commands.end());
-    release_time.insert(release_time.end(), release_times.begin(), release_times.end());
+void Controller::EnqueuePimCommands(PimSource source, const std::vector<Command>& commands,
+                                    const std::vector<int>& releases) {
+    if (!releases.empty() && releases.size() != commands.size())
+        throw std::invalid_argument("PIM release times must match commands");
+    for (size_t i = 0; i < commands.size();) {
+        PimOperation operation(commands[i], releases.empty() ? 0 : releases[i]);
+        size_t count = operation.IsLocal() ? config_.banks : 1;
+        if (i + count > commands.size()) throw std::invalid_argument("Incomplete LH broadcast");
+        operation.commands.assign(commands.begin()+i,commands.begin()+i+count);
+        for (size_t j=i; !releases.empty() && j<i+count; ++j)
+            if (releases[j] != releases[i]) throw std::invalid_argument("Incompatible LH release times");
+        EnqueuePimOperation(source,operation);
+        i += count;
+    }
+}
+
+void Controller::EnqueueWeightCommands(const std::vector<Command>& commands) {
+    EnqueuePimCommands(PimSource::WEIGHT,commands,{});
+}
+
+void Controller::EnqueueInputCommands(const std::vector<Command>& commands,
+                                      const std::vector<int>& releases) {
+    if (commands.size() != releases.size())
+        throw std::invalid_argument("PIM release times must match commands");
+    EnqueuePimCommands(PimSource::INPUT,commands,releases);
 }
 
 void Controller::EnqueueOutputCommands(const std::vector<Command>& commands) {
-    wr_cmds_.insert(wr_cmds_.end(), commands.begin(), commands.end());
+    EnqueuePimCommands(PimSource::OUTPUT,commands,{});
+}
+
+bool Controller::HasPendingPim(PimSource source) const {
+    return !(source == PimSource::WEIGHT ? rd_w_cmds_ :
+             source == PimSource::INPUT ? rd_in_cmds_ : wr_cmds_).empty();
 }
 
 bool Controller::PimQueuesEmpty() const {
     return rd_w_cmds_.empty() && rd_in_cmds_.empty() && wr_cmds_.empty();
 }
 
-void Controller::ScheduleWeightPimCommands() {
-    for (auto it = rd_w_cmds_.begin(); it != rd_w_cmds_.end(); ) {
-
-        bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
-        bool is_read = it->cmd_type == CommandType::GH_READ;
-        bool is_readp = it->cmd_type == CommandType::GH_READ_PRECHARGE;
-        bool is_pim = it->cmd_type == CommandType::PIM_ACTIVATE || it->cmd_type == CommandType::GH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ;
-
-        CommandType act_type = CommandType::PIM_ACTIVATE;
-        CommandType read_type = CommandType::GH_READ;
-        CommandType readp_type = CommandType::GH_READ_PRECHARGE;
-
-        Command ready_cmd;
-        if (is_act) {
-            Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
-            ready_cmd = GetReadyCommand(rd_cmd, clk_);
+bool Controller::HasPendingPimInRank(int rank) const {
+    for (const auto* queue : {&rd_w_cmds_, &rd_in_cmds_, &wr_cmds_}) {
+        for (const auto& operation : *queue) {
+            // Enqueue validation guarantees every target belongs to this rank.
+            if (operation.commands.front().Rank() == rank) return true;
         }
-        else if (it->cmd_type == CommandType::PRECHARGE)
-            ready_cmd = *it;
-        else
-            ready_cmd = GetReadyCommand(*it, clk_);
-
-
-        if (ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
-            if (!(channel_state_.IsRefreshWaiting() && is_act)) {
-
-                IssueCommand(*it);
-            }
-            it = rd_w_cmds_.erase(it); // TODO it++ when not erased
-        }
-        else it++;
-
     }
+    return false;
 }
 
-void Controller::ScheduleInputPimCommands() {
-    int i = 0;
-    int j = 0;
-    for (auto it = rd_in_cmds_.begin(); it != rd_in_cmds_.end(); ) {
-
-        bool is_act = it->cmd_type == CommandType::PIM_ACTIVATE;
-        bool is_read = it->cmd_type == CommandType::LH_READ || it->cmd_type == CommandType::GH_READ;
-        bool is_readp = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::GH_READ_PRECHARGE;
-        bool is_local = it->cmd_type == CommandType::LH_READ_PRECHARGE || it->cmd_type == CommandType::LH_READ;
-
-        CommandType act_type = CommandType::PIM_ACTIVATE;
-        CommandType read_type = is_local ? CommandType::LH_READ : CommandType::GH_READ;
-        CommandType readp_type = is_local ? CommandType::LH_READ_PRECHARGE : CommandType::GH_READ_PRECHARGE;
-
-        Command ready_cmd;
-        if (is_act) {
-            // std::cout<<clk_<<" "<<j<<" "<<*it<<std::endl;
-            Command rd_cmd = Command(read_type, it->addr, it->hex_addr);
-            ready_cmd = GetReadyCommand(rd_cmd, clk_);
+bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, bool input) {
+    // An unready target may not hold another bank's eligible transfer hostage.
+    // Preserve per-bank order while permitting A,B,A,B interleaving.
+    std::set<std::tuple<int,int,int>> blocked_banks;
+    for (size_t i=0; i<queue.size(); ++i) {
+        const auto& pending = queue[i];
+        bool blocked = false;
+        for (const auto& cmd : pending.commands)
+            blocked |= blocked_banks.count(std::make_tuple(cmd.Rank(),cmd.Bankgroup(),cmd.Bank())) != 0;
+        for (const auto& cmd : pending.commands)
+            blocked_banks.emplace(cmd.Rank(),cmd.Bankgroup(),cmd.Bank());
+        if (blocked) continue;
+        auto ready = channel_state_.GetReadyPimOperation(pending,clk_);
+        if (!ready.IsValid() || (ready.IsGlobal() && clk_ < next_global_io_cycle_) ||
+            (ready.IsActivate() && channel_state_.IsRefreshWaiting())) continue;
+#ifdef CMD_TRACE
+        pim_trace_ << clk_ << " " << channel_id_ << " " << ready.Name() << " "
+                   << ready.commands.front().Rank() << " ";
+        for (size_t target=0; target<ready.commands.size(); ++target) {
+            if (target) pim_trace_ << ",";
+            pim_trace_ << ready.commands[target].Bankgroup() << ":" << ready.commands[target].Bank();
         }
-        else
-            ready_cmd = GetReadyCommand(*it, clk_);
-
-        if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type && clk_ >= release_time[i]) {
-            if (!(channel_state_.IsRefreshWaiting() && is_act)) {
-                IssueCommand(*it);
-            }
-            // std::cout<<clk_<<" erase "<<std::endl;
-            it = rd_in_cmds_.erase(it); // TODO it++ when not erased
-            release_time.erase(release_time.begin() + i);
+        pim_trace_ << std::endl;
+#endif
+        // All bank prerequisites and aggregate activation cost were checked
+        // without mutation. Issue the validated broadcast's physical effects.
+        for (const auto& cmd : ready.commands) IssueCommand(cmd);
+        if (ready.IsGlobal()) next_global_io_cycle_ = clk_ + std::max(1,config_.tCCD_S);
+        if (ready.opcode == pending.opcode) {
+            queue.erase(queue.begin()+i);
+            if (input) release_time.erase(release_time.begin()+i);
         }
-        else {
-            it++;
-            i++;
-        }
-        j++;
+        return true;
     }
-}
-
-void Controller::ScheduleOutputPimCommands() {
-    for (auto it = wr_cmds_.begin(); it != wr_cmds_.end(); ) {
-        Command ready_cmd;
-        if (it->cmd_type == CommandType::PIM_ACTIVATE) {
-            Command wr_cmd = Command(CommandType::PIM_WRITE, it->addr, it->hex_addr);
-            ready_cmd = GetReadyCommand(wr_cmd, clk_);
-        }
-        else
-            ready_cmd = GetReadyCommand(*it, clk_);
-
-        if(ready_cmd.IsValid() && ready_cmd.cmd_type == it->cmd_type) {
-            if (!(channel_state_.IsRefreshWaiting() && it->cmd_type == CommandType::PIM_ACTIVATE)) {
-                IssueCommand(*it);
-                it = wr_cmds_.erase(it); // TODO it++ when not erased
-                if (wr_multitenant) break;
-            }
-            else
-                it = wr_cmds_.erase(it); // TODO it++ when not erased
-
-        }
-        else it++;
-    }
+    return false;
 }
 
 void Controller::ClockTick() {
@@ -198,15 +206,16 @@ void Controller::ClockTick() {
     if (channel_state_.IsRefreshWaiting()) {
         cmd = cmd_queue_.FinishRefresh();
     }
+    const bool refresh_command = cmd.IsValid();
 
     // cannot find a refresh related command or there's no refresh
     // priority 3: general command
-    if (!cmd.IsValid()) {
+    if (!cmd.IsValid() && PimQueuesEmpty()) {
         cmd = cmd_queue_.GetCommandToIssue();
     }
 
     // priority 2: pim command
-    if (cmd.IsRefresh() || PimQueuesEmpty()) {
+    if (refresh_command || PimQueuesEmpty()) {
 
         if (cmd.IsValid()) {
             IssueCommand(cmd);
@@ -225,10 +234,9 @@ void Controller::ClockTick() {
     }
     else {
         // TODO if second == 0, issue and set cmd_issue true. else, decrement by 1.
-        cmd_issued = true;
-        ScheduleWeightPimCommands();
-        ScheduleInputPimCommands();
-        ScheduleOutputPimCommands();
+        cmd_issued = SchedulePimQueue(rd_w_cmds_, false) ||
+                     SchedulePimQueue(rd_in_cmds_, true) ||
+                     SchedulePimQueue(wr_cmds_, false);
         // rd_in_cmds_.clear(); //used in MT
     }
 
@@ -253,9 +261,11 @@ void Controller::ClockTick() {
     // power updates pt 2: move idle ranks into self-refresh mode to save power
     if (config_.enable_self_refresh && !cmd_issued) {
         for (auto i = 0; i < config_.ranks; i++) {
+            const bool rank_has_work = !cmd_queue_.rank_q_empty[i] ||
+                                       HasPendingPimInRank(i);
             if (channel_state_.IsRankSelfRefreshing(i)) {
                 // wake up!
-                if (!cmd_queue_.rank_q_empty[i]) {
+                if (rank_has_work) {
                     auto addr = Address();
                     addr.rank = i;
                     auto cmd = Command(CommandType::SREF_EXIT, addr, -1);
@@ -266,7 +276,7 @@ void Controller::ClockTick() {
                     }
                 }
             } else {
-                if (cmd_queue_.rank_q_empty[i] &&
+                if (!rank_has_work &&
                     channel_state_.rank_idle_cycles[i] >=
                         config_.sref_threshold) {
                     auto addr = Address();

@@ -2,6 +2,7 @@ import os
 import argparse
 import math
 import configparser
+import ast
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-w", default=".", help="file mode: workload file path")
@@ -39,80 +40,46 @@ def extract_variables(file_path):
 
 
 def gen_pim_trace(workload, trace_file, row_addr):
-    fin = open(workload, 'r')
-    fout = open(trace_file, 'w')
-    line = fin.readline()
-    cutV, cutH, tile_M, post_delay, mcf, ucf, df = eval(line)
-    # print(cutV, cutH, tile_M, post_delay)
+    # Single-array format: one dataflow header and one (M, K, N) tuple.
+    with open(workload, 'r') as fin:
+        header = ast.literal_eval(fin.readline())
+        if not isinstance(header, (tuple, list)) or len(header) != 5:
+            raise ValueError("Expected five-field header: tile_M, post_delay, "
+                             "mcf, ucf, df; regenerate legacy workloads")
+        tile_M, post_delay, mcf, ucf, df = header
+        m, k, n = ast.literal_eval(fin.readline())
+        if fin.read().strip():
+            raise ValueError("Expected exactly one (M, K, N) workload")
 
-    exp = 5
+    # Bits 0..2 identify the transaction; remaining fields are contiguous.
+    config_addr = (3 << 1)
+    config_addr |= int(math.log(mcf, 2)) << 3
+    config_addr |= int(math.log(ucf, 2)) << 6
+    config_addr |= df << 9
+    config_addr |= int(math.log(tile_M, 2)) << 10
 
-    cutaddr = 3 * (2**exp)
-    exp += 2
-    cutaddr += math.log(cutV, 2) * (2**exp)
-    exp += 3
-    cutaddr += math.log(cutH, 2) * (2**exp)
-    exp += 1
-    cutaddr += math.log(mcf, 2) * (2**exp)
-    exp += 3
-    cutaddr += math.log(ucf, 2) * (2**exp)
-    exp += 3
-
-    cutaddr += df * (2**exp)
-    exp += 1
-
-    cutaddr += math.log(tile_M, 2) * (2**exp)
-
+    dims = (m, k, n)
     loadaddrs = []
-
-    cutSize = cutV*cutH
-    for i in range(cutV*cutH):
-        line = fin.readline()
-        dims = eval(line)
-        # print(dims)
-        for (j, dim) in enumerate(dims):
-            # print(j, dim)
-            exp = 1
-            loadaddr = i * (2**exp)
-            exp += 4
-            loadaddr += j * (2**exp)
-            exp += 2
-            if (df == 0 and j==0):
-                dim = int(dim/2) # GEMM interleaving
-            if (df == 1): # N[i] == 1 (mcf*ucf == 16)
-                if (j == 0):
-                    loadaddr += max(1, int(dim/mcf)) * (2**exp)
-                elif (j == 1):
-                    loadaddr += max(1, int(dim/ucf)) * (2**exp)
-                else:
-                    loadaddr += dim*ucf * (2**exp)
+    for j, dim in enumerate(dims):
+        if df == 0 and j == 0:
+            dim = int(dim/2)  # GEMM interleaving
+        if df == 1:
+            if j == 0:
+                dim = max(1, int(dim/mcf))
+            elif j == 1:
+                dim = max(1, int(dim/ucf))
             else:
-                loadaddr += dim * (2**exp)
-            exp += 32
-            if (df == 0 and j!=0): # Allocating addresses of Inputs and outputs in GEMM kernel
-                loadaddr += ((int(dims[1]*dims[2]/1024)+1) if row_addr == -1 else  int(row_addr)) * (2**exp)
-            elif (df == 1 and j!=2): # Allocating addresses of Inputs and outputs in GEMV kernel
-                loadaddr += ((int(dims[1]*dims[0]/1024)+1) if row_addr == -1 else  int(row_addr)) * (2**exp)
-            else: # Allocating address of Weights to 0
-                loadaddr += 0
-            loadaddrs.append(loadaddr)
-    exp = 0
-    compaddr = 1
-    exp += 1
-    compaddr += (2**(cutV*cutH)-1) * (2**exp)
+                dim *= ucf
+        base_row = 0
+        if df == 0 and j != 0:  # Inputs/outputs in GEMM
+            base_row = int(k*n/1024)+1 if row_addr == -1 else int(row_addr)
+        elif df == 1 and j != 2:  # Inputs/outputs in GEMV
+            base_row = int(k*m/1024)+1 if row_addr == -1 else int(row_addr)
+        loadaddrs.append((j << 1) | (dim << 3) | (base_row << 35))
 
-    fin.close()
-
-    cycle = 0
-    fout.write(hex(int(cutaddr)) + '\tPIM\t' + str(cycle) + '\n')
-    cycle += 1
-    for addr in loadaddrs:
-        fout.write(hex(int(addr)) + '\tPIM\t' + str(cycle) + '\n')
-        cycle += 1
-    fout.write(hex(int(compaddr)) + '\tPIM\t' + str(cycle) + '\n')
-
-    fout.close()
-    return
+    with open(trace_file, 'w') as fout:
+        for cycle, addr in enumerate([config_addr] + loadaddrs + [0x1]):
+            fout.write(hex(addr) + '\tPIM\t' + str(cycle) + '\n')
 
 
 if __name__ == "__main__":

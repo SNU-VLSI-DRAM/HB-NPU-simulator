@@ -10,7 +10,7 @@
 #include "controller.h"
 #include "pim_command_batch.h"
 #include "pim_config.h"
-#include "pim_partition_state.h"
+#include "pim_execution_state.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -85,11 +85,12 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool PimCommandsBlockedByRefresh() const;
     void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
     void DispatchCommands(const PimCommandBatch& batch);
+    bool PendingPimSource(PimSource source) const;
     void TickControllers();
     PimDataflowConfig pim_config_;
 
    public:
-    std::vector<PimPartitionState> partitions_;
+    PimExecutionState execution_;
 
 
     std::vector<std::vector<bool>> bank_occupancy_;

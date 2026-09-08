@@ -88,6 +88,9 @@ Command BankState::GetReadyCommand(const Command& cmd, uint64_t clk) const {
             break;
         case State::SREF:
             switch (cmd.cmd_type) {
+                case CommandType::SREF_EXIT:
+                    required_type = CommandType::SREF_EXIT;
+                    break;
                 case CommandType::READ:
                 case CommandType::READ_PRECHARGE:
                 case CommandType::WRITE:

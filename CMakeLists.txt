@@ -69,11 +69,12 @@ if (THERMAL)
 endif (THERMAL)
 
 if (CMD_TRACE)
-    target_compile_options(dramsim3 PRIVATE -DCMD_TRACE)
+    # Trace members appear in public class layouts; consumers need the same ABI.
+    target_compile_definitions(dramsim3 PUBLIC CMD_TRACE)
 endif (CMD_TRACE)
 
 if (ADDR_TRACE)
-    target_compile_options(dramsim3 PRIVATE -DADDR_TRACE)
+    target_compile_definitions(dramsim3 PUBLIC ADDR_TRACE)
 endif (ADDR_TRACE)
 
 
@@ -106,6 +107,7 @@ add_executable(dramsim3test
     tests/test_dramsys.cc
     tests/test_hmcsys.cc # IDK somehow this can literally crush your computer
     tests/test_pim.cc
+    tests/test_pim_operations.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)
@@ -119,6 +121,25 @@ set_tests_properties(dramsim3_unit PROPERTIES
 )
 
 find_package(PythonInterp 3 REQUIRED)
+add_test(
+    NAME hbnpu_gh_timing
+    COMMAND ${PYTHON_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/regression/test_gh_timing.py
+            $<TARGET_FILE:dramsim3main>
+)
+set_tests_properties(hbnpu_gh_timing PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+add_test(
+    NAME hbnpu_workload_format_unit
+    COMMAND ${PYTHON_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/test_workload_format.py
+)
+set_tests_properties(hbnpu_workload_format_unit PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
 add_test(
     NAME hbnpu_regression_runner_unit
     COMMAND ${PYTHON_EXECUTABLE} -B

@@ -37,6 +37,7 @@ class Controller {
     void ResetStats() { simple_stats_.Reset(); }
     std::pair<uint64_t, int> ReturnDoneTrans(uint64_t clock);
     Command GetReadyCommand(Command& cmd, uint64_t clk);
+    Command GetReadyPimRead(Command& cmd, uint64_t clk, int bank_slot);
     bool pim_refresh_coming();
     bool pim_refresh_coming2() { return refresh_.pim_refresh_coming2();};
     bool IsInRef() { return cmd_queue_.IsInRef(); };
@@ -44,23 +45,25 @@ class Controller {
     void EnqueueInputCommands(const std::vector<Command>& commands,
                               const std::vector<int>& release_times);
     void EnqueueOutputCommands(const std::vector<Command>& commands);
+    void EnqueuePimOperation(PimSource source, const PimOperation& operation);
+    bool HasPendingPim(PimSource source) const;
 
     int channel_id_;
 
    private:
     friend class ControllerTestPeer;
 
-    std::vector<Command> rd_in_cmds_;
-    std::vector<Command> rd_w_cmds_;
-    std::vector<Command> wr_cmds_;
+    std::vector<PimOperation> rd_in_cmds_;
+    std::vector<PimOperation> rd_w_cmds_;
+    std::vector<PimOperation> wr_cmds_;
     std::vector<int> release_time;
 
    public:
-    bool wr_multitenant = false;
     bool in_pim = false;
 
    private:
     uint64_t clk_;
+    uint64_t next_global_io_cycle_ = 0;
     const Config &config_;
     SimpleStats simple_stats_;
     ChannelState channel_state_;
@@ -89,6 +92,7 @@ class Controller {
 
 #ifdef CMD_TRACE
     std::ofstream cmd_trace_;
+    std::ofstream pim_trace_;
 #endif  // CMD_TRACE
 
     // used to calculate inter-arrival latency
@@ -101,9 +105,10 @@ class Controller {
     Command TransToCommand(const Transaction &trans);
     void UpdateCommandStats(const Command &cmd);
     bool PimQueuesEmpty() const;
-    void ScheduleWeightPimCommands();
-    void ScheduleInputPimCommands();
-    void ScheduleOutputPimCommands();
+    bool HasPendingPimInRank(int rank) const;
+    bool SchedulePimQueue(std::vector<PimOperation>& queue, bool input);
+    void EnqueuePimCommands(PimSource source, const std::vector<Command>& commands,
+                            const std::vector<int>& releases);
 };
 }  // namespace dramsim3
 #endif

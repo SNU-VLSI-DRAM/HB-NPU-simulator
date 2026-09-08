@@ -55,6 +55,22 @@ def parse_command_trace(path):
     return commands
 
 
+def parse_pim_issue_trace(path):
+    issues = []
+    for line in path.read_text().splitlines():
+        fields = line.split()
+        if len(fields) != 5:
+            raise AssertionError("invalid PIM issue trace line: " + line)
+        targets = [[int(part) for part in bank.split(":")]
+                   for bank in fields[4].split(",")]
+        if any(len(bank) != 2 for bank in targets):
+            raise AssertionError("invalid PIM target set: " + line)
+        issues.append({"cycle": int(fields[0]), "channel": int(fields[1]),
+                       "kind": fields[2], "rank": int(fields[3]),
+                       "targets": targets})
+    return issues
+
+
 def run_case(binary, trace):
     with tempfile.TemporaryDirectory(prefix="hbnpu-regression-") as temp_name:
         output_dir = Path(temp_name)
@@ -89,12 +105,21 @@ def run_case(binary, trace):
             str(channel): parse_command_trace(command_paths[channel])
             for channel in range(8)
         }
-        return {
+        result = {
             "terminated": True,
             "termination_cycle": int(stats["0"]["num_cycles"]),
             "commands": commands,
             "stats": stats,
         }
+        issue_paths = [output_dir / "dramsim3ch_{}pim.trace".format(channel)
+                       for channel in range(8)]
+        if any(path.exists() for path in issue_paths):
+            if not all(path.exists() for path in issue_paths):
+                raise AssertionError("missing PIM issue trace for some channels")
+            result["pim_issues"] = {
+                str(channel): parse_pim_issue_trace(path)
+                for channel, path in enumerate(issue_paths)}
+        return result
 
 
 def energy_close(actual, expected):
@@ -197,12 +222,19 @@ def summarize_long_case(full_result):
             commands, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         command_sha256[channel] = hashlib.sha256(canonical).hexdigest()
-    return {
+    summary = {
         "terminated": full_result["terminated"],
         "termination_cycle": full_result["termination_cycle"],
         "command_sha256": command_sha256,
         "stats": full_result["stats"],
     }
+    if "pim_issues" in full_result:
+        summary["pim_issue_sha256"] = {
+            channel: hashlib.sha256(json.dumps(
+                issues, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")).hexdigest()
+            for channel, issues in full_result["pim_issues"].items()}
+    return summary
 
 
 def run_opt27b_once(binary):

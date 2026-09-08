@@ -37,6 +37,45 @@ def replace_runner_globals(**replacements):
 
 
 class RegressionRunnerTest(unittest.TestCase):
+    def test_long_summary_detects_changed_logical_issue_cycle(self):
+        result = regression_result(42)
+        result["pim_issues"] = {"0": [{"cycle": 30, "channel": 0,
+            "kind": "GANG_ACT", "rank": 0,
+            "targets": [[0, 0], [0, 1], [0, 2], [0, 3]]}]}
+        original = run_regression.summarize_long_case(result)
+        self.assertIn("pim_issue_sha256", original)
+        result["pim_issues"]["0"][0]["cycle"] = 31
+        changed = run_regression.summarize_long_case(result)
+        self.assertNotEqual(original["pim_issue_sha256"], changed["pim_issue_sha256"])
+        self.assertEqual(original["command_sha256"], changed["command_sha256"])
+
+    def test_run_case_retains_logical_issue_groups_when_emitted(self):
+        # Catches silently discarding a broadcast boundary while collecting
+        # the expanded physical command trace.
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            binary = temp_dir / "fake_simulator.py"
+            binary.write_text("""#!/usr/bin/env python3
+import json
+from pathlib import Path
+import sys
+output = Path(sys.argv[7])
+(output / 'dramsim3.json').write_text(json.dumps({'0': {'num_cycles': 40}}))
+for channel in range(8):
+    (output / f'dramsim3ch_{channel}cmd.trace').write_text('')
+    (output / f'dramsim3ch_{channel}pim.trace').write_text(
+        f'30 {channel} GANG_ACT 0 0:0,0:1,0:2,0:3\\n')
+print('Turn off PIM')
+""")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            result = run_regression.run_case(binary, temp_dir / "input.trace")
+            self.assertIn("pim_issues", result)
+            self.assertEqual(result["pim_issues"]["0"], [{
+                "cycle": 30, "channel": 0, "kind": "GANG_ACT", "rank": 0,
+                "targets": [[0, 0], [0, 1], [0, 2], [0, 3]],
+            }])
+            self.assertEqual(result["pim_issues"]["7"][0]["channel"], 7)
+
     def test_parses_ordered_command_records(self):
         with tempfile.TemporaryDirectory() as temp_name:
             trace = Path(temp_name) / "commands.trace"

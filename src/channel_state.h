@@ -6,6 +6,7 @@
 #include "common.h"
 #include "configuration.h"
 #include "timing.h"
+#include "pim_operation.h"
 
 namespace dramsim3 {
 
@@ -13,10 +14,12 @@ class ChannelState {
    public:
     ChannelState(const Config& config, const Timing& timing);
     Command GetReadyCommand(const Command& cmd, uint64_t clk) const;
+    PimOperation GetReadyPimOperation(const PimOperation& operation, uint64_t clk) const;
+    bool IssuePimOperation(const PimOperation& operation, uint64_t clk);
     void UpdateState(const Command& cmd);
     void UpdateTiming(const Command& cmd, uint64_t clk);
     void UpdateTimingAndStates(const Command& cmd, uint64_t clk);
-    bool ActivationWindowOk(int rank, uint64_t curr_time) const;
+    bool ActivationWindowOk(int rank, uint64_t curr_time, size_t cost = 1) const;
     void UpdateActivationTimes(int rank, uint64_t curr_time);
     bool IsRowOpen(int rank, int bankgroup, int bank) const {
         return bank_states_[rank][bankgroup][bank].IsRowOpen();

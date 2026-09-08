@@ -1,4 +1,5 @@
 #include "channel_state.h"
+#include <algorithm>
 
 namespace dramsim3 {
 ChannelState::ChannelState(const Config& config, const Timing& timing)
@@ -19,6 +20,63 @@ ChannelState::ChannelState(const Config& config, const Timing& timing)
         }
         bank_states_.push_back(rank_states);
     }
+}
+
+PimOperation ChannelState::GetReadyPimOperation(const PimOperation& operation, uint64_t clk) const {
+    operation.Validate(config_);
+    if (clk < operation.release_cycle) return PimOperation();
+    std::vector<Command> acts, pres;
+    bool all_ready = true;
+    for (const auto& cmd : operation.commands) {
+        const auto& bank = bank_states_[cmd.Rank()][cmd.Bankgroup()][cmd.Bank()];
+        Command probe = cmd;
+        if (!operation.IsData()) {
+            if (operation.IsActivate()) {
+                if (bank.IsRowOpen()) return PimOperation();
+                probe.cmd_type = CommandType::GH_READ;
+            } else {
+                if (!bank.IsRowOpen()) return PimOperation();
+                // A row miss asks BankState for PRE with its real recovery timing.
+                probe.cmd_type = CommandType::GH_READ;
+                probe.addr.row = bank.OpenRow() == 0 ? 1 : 0;
+            }
+        }
+        auto ready = bank.GetReadyCommand(probe, clk);
+        if (ready.cmd_type != cmd.cmd_type) all_ready = false;
+        if (operation.IsData() && ready.cmd_type == CommandType::PIM_ACTIVATE)
+            acts.push_back(ready);
+        if (operation.IsData() && ready.cmd_type == CommandType::PRECHARGE)
+            pres.push_back(ready);
+    }
+    if (all_ready) {
+        if (operation.IsActivate() && !ActivationWindowOk(operation.commands.front().Rank(),clk,operation.commands.size()))
+            return PimOperation();
+        return operation;
+    }
+    if (!operation.IsData()) return PimOperation();
+    // Ready subsets make progress even when other banks are waiting for tRCD,
+    // refresh or recovery. Sort targets so gang selection is deterministic.
+    for (auto* candidates : {&pres, &acts}) {
+        if (candidates->empty()) continue;
+        std::sort(candidates->begin(),candidates->end(),[](const Command& a,const Command& b) {
+            return std::make_pair(a.Bankgroup(),a.Bank()) < std::make_pair(b.Bankgroup(),b.Bank());
+        });
+        const bool activate = candidates == &acts;
+        const size_t width = operation.IsLocal() && candidates->size() >= 4 ? 4 : 1;
+        candidates->resize(width);
+        PimOperation prerequisite(activate ? (width == 4 ? PimOpcode::GANG_ACT : PimOpcode::PIM_ACT)
+                                           : (width == 4 ? PimOpcode::GANG_PRE : PimOpcode::PIM_PRE), *candidates);
+        if (!activate || ActivationWindowOk(candidates->front().Rank(),clk,width)) return prerequisite;
+    }
+    return PimOperation();
+}
+
+bool ChannelState::IssuePimOperation(const PimOperation& operation, uint64_t clk) {
+    auto ready = GetReadyPimOperation(operation,clk);
+    if (!ready.IsValid() || ready.opcode != operation.opcode) return false;
+    // Validation is entirely pre-issue; these effects cannot partially fail.
+    for (const auto& cmd : operation.commands) UpdateTimingAndStates(cmd,clk);
+    return true;
 }
 
 bool ChannelState::IsAllBankIdleInRank(int rank) const {
@@ -279,24 +337,25 @@ void ChannelState::UpdateTimingAndStates(const Command& cmd, uint64_t clk) {
     return;
 }
 
-bool ChannelState::ActivationWindowOk(int rank, uint64_t curr_time) const {
-    bool tfaw_ok = IsFAWReady(rank, curr_time);
+bool ChannelState::ActivationWindowOk(int rank, uint64_t curr_time, size_t cost) const {
+    auto live = [curr_time](uint64_t expires) { return expires > curr_time; };
+    bool tfaw_ok = std::count_if(four_aw_[rank].begin(), four_aw_[rank].end(), live) + cost <= 4;
     if (config_.IsGDDR()) {
         if (!tfaw_ok)
             return false;
         else
-            return Is32AWReady(rank, curr_time);
+            return std::count_if(thirty_two_aw_[rank].begin(), thirty_two_aw_[rank].end(), live) + cost <= 32;
     }
     return tfaw_ok;
 }
 
 void ChannelState::UpdateActivationTimes(int rank, uint64_t curr_time) {
-    if (!four_aw_[rank].empty() && curr_time >= four_aw_[rank][0]) {
+    while (!four_aw_[rank].empty() && curr_time >= four_aw_[rank][0]) {
         four_aw_[rank].erase(four_aw_[rank].begin());
     }
     four_aw_[rank].push_back(curr_time + config_.tFAW);
     if (config_.IsGDDR()) {
-        if (!thirty_two_aw_[rank].empty() &&
+        while (!thirty_two_aw_[rank].empty() &&
             curr_time >= thirty_two_aw_[rank][0]) {
             thirty_two_aw_[rank].erase(thirty_two_aw_[rank].begin());
         }
