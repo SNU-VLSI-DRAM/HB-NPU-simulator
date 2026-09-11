@@ -1,10 +1,10 @@
 
 # HB-NPU Simulator
-HB-NPU simulator runs the HB-DRAM PNM accelerator, _HB-NPU_, based on DRAMsim3 open source DRAM simulator.
-We implemented python programs to generate and run the LLM workloads and traces.
-
-We modified DRAMsim3 simulator to support the custom trace format for HB-NPU and the custom DRAM commands of Local HB and Global HB operations.
-Also we implemented Custom command scheduler that executes BLAS functions for the given LLM workloads by generating HB-NPU DRAM commands and enqueueing them to each channel controller of DRAM.
+HB-NPU Simulator models the HB-DRAM near-memory accelerator described in our
+paper, using DRAMsim3 for DRAM timing and energy accounting. Python utilities
+generate OPT prefill and decode workloads and encode their kernel
+configurations into PIM transaction traces. The simulator schedules the
+corresponding Local HB (LH) and Global HB (GH) bank operations dynamically.
 
 If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870),:
 ```
@@ -33,6 +33,17 @@ See the [complete update and migration overview](docs/refactoring/2026-09-hbnpu-
 for the architecture/file map, validation results, performance comparisons, and
 remaining limitations. Old external traces must be regenerated before use.
 
+Implemented changes include:
+
+- Separate PIM transaction decoding, configuration, execution state, and command
+  batching components.
+- One logical PIM issue per channel per cycle, with all-bank LH broadcasts and
+  four-bank `GANG_ACT` / `GANG_PRE` operations.
+- Shared GH read/write transfer slots and corrected GH stage delays.
+- Scheduling progress based on actual data-command issue, with pending work
+  retained through bank preparation and refresh.
+- Physical and logical command traces, unit tests, and exact regression checks.
+
 ## HB-NPU streaming clocks
 
 With the supplied `tCK=1 ns`, `tCCD_S=1`, and `tCCD_L=2` configuration:
@@ -48,6 +59,8 @@ LH operations broadcast to all banks; `GANG_ACT`/`GANG_PRE` operate on four bank
 simultaneously. A gang activation consumes four slots in the rank's `tFAW`
 window. PIM activations intentionally ignore `tRRD`; normal DRAM timing is unchanged.
 Independent channels and the bank effects of one LH broadcast remain parallel.
+Current kernel output stores use GH writes: one selected bank for `df=1`, or
+two interleaved banks for `df=0, mc=2`.
 `in_cnt` and `out_cnt` use the streaming dataflow's array period: `tCCD_S` for
 GH, `tCCD_L` for LH. See [timing details and validation](docs/gh-streaming-timing.md).
 
@@ -71,13 +84,8 @@ We require CMake 3.0+ to build this simulator.
 Doing out of source builds with CMake is recommended to avoid the build files cluttering the main directory.
 
 ```bash
-# cmake out of source build
-mkdir build
-cd build
-cmake .. -DCMD_TRACE=1
-
-# Build dramsim3 library and executables
-make -j4
+cmake -S . -B build -DCMD_TRACE=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j4
 
 ```
 
@@ -106,9 +114,17 @@ which use a relative tolerance of `1e-6` plus an absolute tolerance of `1e-9`.
 Ordinary test runs never update goldens. Golden changes must be explicit via
 `tests/regression/run_regression.py --update-golden` and reviewed separately.
 
-### Reproduce the results from the paper
+The full suite contains six CTest groups, including 36 C++ test cases, timing
+checks, workload parsing, five quick fixtures, and a 46-kernel OPT window.
+A broader comparison across four OPT model sizes preserved per-bank data
+streams in all 159 completed kernel pairs. The remaining OPT-66B kernel matched
+over a 100,000-cycle common prefix; full completion of that case remains
+unverified. See the [comparison report](docs/refactoring/2026-09-original-master-llm-comparison.md).
+These checks validate simulator command behavior, not numerical model outputs.
 
-To run all OPT workloads in our evaluation, enter below command. (We will add the support for other LLMs soon.)
+### Run the OPT evaluation
+
+To run all OPT workloads in the configured evaluation set, use:
 It can take about 30 minutes or longer depending on the running environment.
 ```bash
 bash run_models.sh
@@ -119,6 +135,11 @@ To run a specific workload, enter below command.
 python3 run_demo.py -m OPT-66B -i 1024 -o 128 -b 128
 ```
 You can check the detailed results reported to ```result.xlsx```.
+
+For historical comparisons with the paper, the pre-update revision is
+`502b52750778242c3a76845e40af32674e5baefd`. Use that revision with its matching
+configurations and input traces. Current timing corrections can change cycle
+counts relative to that version.
 
 ### Creating new trace files and workloads
 The simulator now uses a single-array workload/trace format. Workload headers
@@ -142,7 +163,9 @@ python3 gen_workload_prompt.py -s 128
 # generating decode workload for tokens from 10-th to 1600-th generation and batch sizes from 32 to 128 (32, 64, 128, power of twos).
 python3 gen_workload_decode.py -s 10 -e 1600 -sb 32 -eb 128
 ```
-Or you can add a new model configuration by adding it to ```models``` file and re-run the above generators.
+The `models` file supplies parameters to the existing workload generators.
+Adding a configuration does not automatically implement a different model
+architecture. Its fields are:
 ```
 # [model_name] [parameter size (B)] [# of layers] [d_model] [# of heads] [d_head] [TP] [PP]
 OPT-2.7B 2.7 32 2560 32 80 32 1
@@ -151,16 +174,29 @@ OPT-2.7B 2.7 32 2560 32 80 32 1
 You can run HB-NPU with a sample trace of a matrix multiplication kernel using the below command.
 Trace files are in ```traces/``` folder.
 ```bash
-./build/dramsim3main configs/HBM2_8Gb_x128.ini -c 5000000 -t [trace_file]
+mkdir -p output/example
+./build/dramsim3main configs/HBM2_8Gb_x128.ini \
+  -c 100000 \
+  -t traces/OPT-2.7B_128_1024_32/prompt/createQKV \
+  -o output/example/
 ```
-You can check the simulation results immediately on console.
-```bash
-3374 End of Computation 0 
-3409 Output Exhausted. Array0 Turn off PIM mode. # Completed operations in 3409 cycles.
-Turn off PIM
-```
-You can see the command trace and statistics in ```dramsim3ch_[0-7]cmd.trace``` and ```dramsim3.txt```.
-Command trace shows the cycles and addresses of executed operations with their command types.
+`-c` limits simulated cycles. The simulator can finish earlier when the kernel
+and its output transfers complete, reported by `Output Exhausted` and
+`Turn off PIM`. Reaching the cycle limit alone does not establish completion.
+
+The output directory contains:
+
+| File | Contents |
+|---|---|
+| `dramsim3.json`, `dramsim3.txt` | Cycle counts, command statistics, and energy |
+| `dramsim3ch_<channel>cmd.trace` | Physical effects: cycle, command, channel, rank, bank group, bank, row, column |
+| `dramsim3ch_<channel>pim.trace` | Logical issue: cycle, channel, opcode, rank, target banks |
+
+A broadcast or gang produces one logical record and multiple physical bank
+records. Physical writes retain `pim_write` / `pim_write_p`; the logical trace
+identifies the LH/GH operation. Row and column fields are hexadecimal.
+The following physical trace excerpts illustrate the format; addresses and
+cycles depend on the workload and configuration.
 ```bash
 # Global HB Read
 5                  pim_activate           1   0   0   0   0x199d      0x0
@@ -219,26 +255,19 @@ num_lh_read_cmds              =        10272
 num_gh_read_row_hits          =        1435   
 num_gh_read_cmds              =        1500   
 ```
-## Code Structure
+## Code structure
 
-```
-├── configs                 # Configs of various protocols that describe timing constraints and power consumption.
-├── ext                     # 
-├── scripts                 # Tools and utilities
-├── src                     # DRAMsim3 source files
-├── tests                   # Tests of each model, includes a short example trace
-├── CMakeLists.txt
-├── Makefile
-├── LICENSE
-└── README.md
-
-├── src  
-    bankstate.cc: Added command supports for HB-NPU commands (LH_READ, GH_READ, etc.).
-    channelstate.cc: Added update process for HB-NPU command timing and states
-    configuration.cc: Added support for HB-NPU commands.
-    controller.cc: Maintains the per-channel controller. We added the _in-order_ HB-NPU command queue management process.
-    cpu.cc: handles PIM transactions and manages PIM transaction queue
-    dram_system.cc:  Since DRAMsim3 implements per-channel controller originally, we added the upper hierarchy control scheme here. Our centralized custom controller generates DRAM commands for entire system simultaneously and schedules them to in-order command queues in per-channel controllers.
-    refresh.cc: Added refresh checking process for pausing HB-NPU operations not to be interrupted by refresh.
-    timing.cc: Added support for HB-NPU commands.
-```
+| Path | Responsibility |
+|---|---|
+| `gen_workload_prompt.py`, `gen_workload_decode.py` | Generate prefill/decode kernel workloads |
+| `gen_LLM_trace.py` | Encode workload parameters and base rows into PIM transactions |
+| `src/cpu.cc` | Submit transactions with queue backpressure |
+| `src/pim_transaction.{h,cc}` | Decode PIM transactions |
+| `src/pim_config.h`, `src/pim_execution_state.h` | Kernel configuration and execution progress |
+| `src/dram_system.cc` | Schedule matrix operations and dispatch channel work |
+| `src/pim_operation.h`, `src/pim_command_batch.h` | Represent logical PIM operations and batches |
+| `src/controller.cc` | Arbitrate per-channel commands and issue eligible bank operations |
+| `src/channel_state.cc`, `src/bankstate.cc`, `src/timing.cc` | Track bank state and enforce timing constraints |
+| `src/refresh.cc` | Manage refresh scheduling |
+| `configs/`, `workloads/`, `traces/` | DRAM configurations and generated inputs |
+| `tests/`, `docs/` | Regression coverage and user documentation |
