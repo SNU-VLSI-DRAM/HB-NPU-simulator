@@ -240,6 +240,8 @@ void JedecDRAMSystem::ProcessPimTransaction() {
                 execution_.in_pim = true;
                 tile_executor_.reset(new PimTileExecutor(
                     config_, PimKernelContext::Capture(pim_config_, execution_)));
+                tile_scheduler_.reset(new LegacyTileScheduler(
+                    PimKernelContext::Capture(pim_config_, execution_), config_.channels));
                 pim_trans_queue_.erase(it);
             }
             for (size_t i=0; i<ctrls_.size(); i++) {
@@ -252,6 +254,7 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             pim_config_.Load(decoded);
             execution_ = PimExecutionState();
             tile_executor_.reset();
+            tile_scheduler_.reset();
 
             pim_trans_queue_.erase(it);
             break;
@@ -311,7 +314,20 @@ void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
     feedback.weight_pending = PendingPimSource(PimSource::WEIGHT);
     feedback.input_pending = PendingPimSource(PimSource::INPUT);
     feedback.output_pending = PendingPimSource(PimSource::OUTPUT);
-    auto result = tile_executor_->RunLegacy(clk_, feedback, execution_);
+    PimDescriptorSource source;
+    source.next_compute = [this](PimComputeBlock& block) {
+        return tile_scheduler_->NextCompute(block);
+    };
+    source.next_output = [this](PimOutputBlock& block) {
+        return tile_scheduler_->NextOutput(block);
+    };
+    auto result = tile_executor_->Tick(clk_, feedback, source);
+    execution_ = tile_executor_->Snapshot();
+    tile_scheduler_->ProjectProgress(execution_, result.compute_exhausted, result.output_exhausted);
+    if (result.computation_finished)
+        std::cout << clk_ << " End of Computation 0" << std::endl;
+    if (result.finished)
+        std::cout << clk_ << " Output Exhausted: Array0. Turn off PIM mode.\n";
     DispatchCommands(result.batch);
     if (result.finished) turn_off = true;
 }

@@ -11,6 +11,8 @@ class LegacyTileScheduler {
     LegacyTileScheduler(const PimKernelContext& context, int channels);
     bool NextCompute(PimComputeBlock& block);
     bool NextOutput(PimOutputBlock& block);
+    void ProjectProgress(PimExecutionState&, bool compute_exhausted,
+                         bool output_exhausted) const;
 
    private:
     const PimKernelContext context_;

@@ -52,4 +52,18 @@ bool LegacyTileScheduler::NextOutput(PimOutputBlock& block) {
     return true;
 }
 
+void LegacyTileScheduler::ProjectProgress(PimExecutionState& state,
+                                        bool compute_exhausted,
+                                        bool output_exhausted) const {
+    if (compute_exhausted) {
+        state.m_it = m_origin_;
+        state.n_it = n_origin_;
+        state.k_tile_it = k_origin_ / k_tile_size_;
+    }
+    if (output_exhausted) {
+        state.m_out_it = output_m_origin_;
+        state.n_out_tile_it = output_n_tile_;
+    }
+}
+
 }  // namespace dramsim3

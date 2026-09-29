@@ -13,6 +13,7 @@
 #include "pim_config.h"
 #include "pim_execution_state.h"
 #include "pim_tile_executor.h"
+#include "legacy_tile_scheduler.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -91,6 +92,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     void TickControllers();
     PimDataflowConfig pim_config_;
     std::unique_ptr<PimTileExecutor> tile_executor_;
+    std::unique_ptr<LegacyTileScheduler> tile_scheduler_;
 
    public:
     PimExecutionState execution_;
