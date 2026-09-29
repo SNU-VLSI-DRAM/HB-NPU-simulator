@@ -166,6 +166,15 @@ set_tests_properties(hbnpu_quick_regression PROPERTIES
 )
 
 add_test(
+    NAME hbnpu_binary_comparison_unit
+    COMMAND ${PYTHON_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/regression/test_compare_binaries.py
+)
+set_tests_properties(hbnpu_binary_comparison_unit PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+add_test(
     NAME hbnpu_opt27b_end_to_end
     COMMAND ${PYTHON_EXECUTABLE}
             ${PROJECT_SOURCE_DIR}/tests/regression/run_regression.py

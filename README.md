@@ -114,13 +114,33 @@ which use a relative tolerance of `1e-6` plus an absolute tolerance of `1e-9`.
 Ordinary test runs never update goldens. Golden changes must be explicit via
 `tests/regression/run_regression.py --update-golden` and reviewed separately.
 
-The full suite contains six CTest groups, including 36 C++ test cases, timing
-checks, workload parsing, five quick fixtures, and a 46-kernel OPT window.
+The full suite contains seven CTest groups, including 50 C++ test cases, timing
+checks, workload parsing, five quick fixtures, a 46-kernel OPT window, and tests
+of the bounded two-binary comparison tool.
 A broader comparison across four OPT model sizes preserved per-bank data
 streams in all 159 completed kernel pairs. The remaining OPT-66B kernel matched
 over a 100,000-cycle common prefix; full completion of that case remains
 unverified. See the [comparison report](docs/refactoring/2026-09-original-master-llm-comparison.md).
 These checks validate simulator command behavior, not numerical model outputs.
+
+To compare two command-tracing builds on the same kernel, including a bounded
+run of a large workload:
+
+```bash
+python3 tests/regression/compare_binaries.py \
+  --baseline /path/to/reference/build/dramsim3main \
+  --candidate /path/to/candidate/build/dramsim3main \
+  --config configs/HBM2_8Gb_x128_pim.ini \
+  --trace traces/OPT-66B_1024_128_128/prompt/L2 \
+  --cycles 100000 --output /tmp/hbnpu-comparison-new
+```
+
+Use separate source trees: each build writes its shared library into its source
+root. The output directory must not already exist. This tool compares physical
+and logical command records exactly, including cycles, and prints the first
+difference. It retains raw traces and a JSON result, applies the same energy
+tolerance as the regressions, and distinguishes full completion from a matching
+bounded run. It currently expects the eight-channel configuration used above.
 
 ### Run the OPT evaluation
 
@@ -263,11 +283,20 @@ num_gh_read_cmds              =        1500
 | `gen_LLM_trace.py` | Encode workload parameters and base rows into PIM transactions |
 | `src/cpu.cc` | Submit transactions with queue backpressure |
 | `src/pim_transaction.{h,cc}` | Decode PIM transactions |
-| `src/pim_config.h`, `src/pim_execution_state.h` | Kernel configuration and execution progress |
-| `src/dram_system.cc` | Schedule matrix operations and dispatch channel work |
+| `src/pim_config.h`, `src/pim_execution_state.h` | Decoded configuration, launch staging, and legacy progress diagnostics |
+| `src/pim_kernel_context.h` | Launch-time kernel context and block descriptors |
+| `src/legacy_tile_scheduler.{h,cc}` | Select compute and output blocks in legacy traversal order |
+| `src/pim_tile_executor.{h,cc}` | Execute supplied blocks, track issued vectors, and preserve stage timing |
+| `src/dram_system.cc` | Coordinate ingress, block selection, refresh, and channel dispatch |
 | `src/pim_operation.h`, `src/pim_command_batch.h` | Represent logical PIM operations and batches |
 | `src/controller.cc` | Arbitrate per-channel commands and issue eligible bank operations |
 | `src/channel_state.cc`, `src/bankstate.cc`, `src/timing.cc` | Track bank state and enforce timing constraints |
 | `src/refresh.cc` | Manage refresh scheduling |
 | `configs/`, `workloads/`, `traces/` | DRAM configurations and generated inputs |
 | `tests/`, `docs/` | Regression coverage and user documentation |
+
+Block selection and execution are separate. The executor owns the active block
+and its vector/stage progress; it cannot select the next matrix block on its own.
+The legacy scheduler supplies blocks synchronously, without adding simulated
+handoff cycles. Command readiness and bank timing remain in the channel
+controllers. Workload formats, trace formats, and simulator invocation are unchanged.
