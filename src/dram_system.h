@@ -2,6 +2,7 @@
 #define __DRAM_SYSTEM_H
 
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@
 #include "pim_command_batch.h"
 #include "pim_config.h"
 #include "pim_execution_state.h"
+#include "pim_tile_executor.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -88,6 +90,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool PendingPimSource(PimSource source) const;
     void TickControllers();
     PimDataflowConfig pim_config_;
+    std::unique_ptr<PimTileExecutor> tile_executor_;
 
    public:
     PimExecutionState execution_;

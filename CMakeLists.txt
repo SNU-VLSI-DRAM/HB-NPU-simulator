@@ -41,6 +41,7 @@ add_library(dramsim3 SHARED
     src/memory_system.cc
     src/pim_transaction.cc
     src/legacy_tile_scheduler.cc
+    src/pim_tile_executor.cc
 )
 
 if (THERMAL)

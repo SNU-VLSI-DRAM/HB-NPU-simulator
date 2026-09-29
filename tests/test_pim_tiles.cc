@@ -1,6 +1,8 @@
 #include <stdexcept>
+#include <algorithm>
 #include "catch.hpp"
 #include "legacy_tile_scheduler.h"
+#include "pim_tile_executor.h"
 
 using namespace dramsim3;
 namespace {
@@ -121,4 +123,58 @@ TEST_CASE("Invalid internal kernel geometry is rejected", "[pim][tile]") {
     SECTION("dataflow") { c.dataflow.df = 2; }
     SECTION("LH output tile") { c.dataflow.df = 1; c.dataflow.m_tile_size = 64; }
     REQUIRE_THROWS_AS(LegacyTileScheduler(c, channels), std::invalid_argument);
+}
+
+TEST_CASE("Executor retires input vectors before starting same-tick output delay", "[pim][tile]") {
+    Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    int df = 0, expected = 4;
+    SECTION("GH") {}
+    SECTION("LH") { df = 1; expected = 23; }
+    auto context = MakeContext(64, 256, 128, df);
+    PimTileExecutor executor(hardware, context);
+    PimExecutionState state;
+    state.m = 64; state.n = 256; state.k = 128;
+    state.in_pim = true; state.iw_status = 2; state.input_pending = true;
+    auto result = executor.RunLegacy(100, PimTickFeedback(), state);
+    REQUIRE(state.m_it == 1);
+    REQUIRE(state.out_cnt == expected);
+    REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::InputVectorIssued) == 1);
+}
+
+TEST_CASE("Executor distinguishes pending data and refresh from data retirement", "[pim][tile]") {
+    Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    PimTileExecutor executor(hardware, MakeContext(64, 256, 128, 0));
+    PimExecutionState state;
+    state.m = 64; state.n = 256; state.k = 128;
+    state.in_pim = true; state.iw_status = 2; state.input_pending = true;
+    PimTickFeedback feedback;
+    bool retired = false;
+    SECTION("one or more channels still pending") { feedback.input_pending = true; }
+    SECTION("refresh freezes execution") { feedback.in_refresh = true; }
+    SECTION("refresh lookahead permits retirement but not enqueue") {
+        feedback.wait_refresh = true; retired = true;
+    }
+    auto result = executor.RunLegacy(100, feedback, state);
+    REQUIRE(state.m_it == (retired ? 1 : 0));
+    REQUIRE(result.batch.operations.empty());
+    REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::InputVectorIssued) == (retired ? 1 : 0));
+}
+
+TEST_CASE("Output uses entry phase and releases counter exactly once", "[pim][tile]") {
+    Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    auto context = MakeContext(64, 256, 128, 0);
+    PimTileExecutor executor(hardware, context);
+    PimExecutionState state;
+    state.m = 64; state.n = 256; state.k = 128;
+    state.m_it = 63; state.iw_status = 2; state.in_pim = true;
+    state.input_pending = true; state.out_cnt = 0;
+    auto result = executor.RunLegacy(100, PimTickFeedback(), state);
+    REQUIRE(state.iw_status == 3);
+    REQUIRE(state.out_cnt == -1);
+    REQUIRE(state.output_valid == 1);
+    REQUIRE(result.batch.operations.empty());
+    REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::OutputStageReleased) == 1);
+    result = executor.RunLegacy(101, PimTickFeedback(), state);
+    REQUIRE_FALSE(result.batch.operations.empty());
+    REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::OutputStageReleased) == 0);
 }
