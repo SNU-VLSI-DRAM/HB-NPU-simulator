@@ -1,5 +1,7 @@
 import copy
+import configparser
 from pathlib import Path
+import tempfile
 import unittest
 from compare_instruction_execution import compare_data_streams, validate_timing
 
@@ -24,6 +26,76 @@ def issue(cycle, kind, targets):
 
 
 class ComparisonTest(unittest.TestCase):
+    def test_bank_refresh_cross_bank_constraints(self):
+        for bg, bank in ((0, 1), (1, 0)):
+            for first, second, earliest in (
+                ("refresh_bank", "pim_activate", 260),
+                ("pim_activate", "refresh_bank", 48),
+                ("refresh_bank", "refresh_bank", 3900),
+            ):
+                for cycle in (earliest - 1, earliest):
+                    with self.subTest(bg=bg, first=first, second=second, cycle=cycle):
+                        a, b = command(0, first), command(cycle, second, bank=bank)
+                        b["bankgroup"] = bg
+                        logical = [
+                            issue(c["cycle"], "PIM_ACT", [[c["bankgroup"], c["bank"]]])
+                            for c in (a, b)
+                            if c["kind"] == "pim_activate"
+                        ]
+                        errors = validate_timing({"0": [a, b]}, {"0": logical}, CONFIG)
+                        self.assertEqual(bool(errors), cycle < earliest, errors)
+
+    def test_bank_refresh_matches_existing_same_bank_application(self):
+        # ChannelState does not apply the same_rank[REFRESH_BANK] tRFCb table.
+        commands = {"0": [command(0, "refresh_bank"), command(1, "pim_activate")]}
+        self.assertEqual(
+            validate_timing(commands, {"0": [issue(1, "PIM_ACT", [[0, 0]])]}, CONFIG),
+            [],
+        )
+
+    def test_omitted_timing_defaults_reject_early_and_accept_legal_commands(self):
+        ini = configparser.ConfigParser()
+        ini.read(CONFIG)
+        for name in ("tCCD_L", "tRP", "tRAS"):
+            ini.remove_option("timing", name)
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "defaults.ini"
+            with config.open("w") as stream:
+                ini.write(stream)
+            for second in (16, 20):
+                commands = {
+                    "0": [
+                        command(0, "pim_activate"),
+                        command(14, "gh_read"),
+                        command(second, "gh_read"),
+                    ]
+                }
+                logical = {
+                    "0": [
+                        issue(0, "PIM_ACT", [[0, 0]]),
+                        issue(14, "GH_READ", [[0, 0]]),
+                        issue(second, "GH_READ", [[0, 0]]),
+                    ]
+                }
+                self.assertEqual(
+                    bool(validate_timing(commands, logical, config)), second < 20
+                )
+            commands = {
+                "0": [
+                    command(0, "pim_activate"),
+                    command(24, "precharge"),
+                    command(34, "pim_activate"),
+                ]
+            }
+            logical = {
+                "0": [
+                    issue(0, "PIM_ACT", [[0, 0]]),
+                    issue(24, "PIM_PRE", [[0, 0]]),
+                    issue(34, "PIM_ACT", [[0, 0]]),
+                ]
+            }
+            self.assertEqual(validate_timing(commands, logical, config), [])
+
     def test_cycle_shift_does_not_hide_data_changes(self):
         reference = {"0": [command(i * 2, "gh_read", column=i) for i in range(8)]}
         candidate = copy.deepcopy(reference)

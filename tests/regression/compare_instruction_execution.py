@@ -18,6 +18,27 @@ sys.path.insert(0, str(ROOT))
 from hbnpu_instruction import KernelConfig, compile_kernel, load_workload, write_trace
 
 DATA = {"gh_read", "gh_read_p", "lh_read", "lh_read_p", "pim_write", "pim_write_p"}
+# Config::InitTimingParams defaults; HBM timing uses tRCDRD/tRCDWR.
+TIMING_DEFAULTS = dict(
+    AL=0,
+    CL=12,
+    CWL=12,
+    tRP=10,
+    tRAS=24,
+    tRTP=5,
+    tWR=10,
+    tCCD_L=6,
+    tCCD_S=4,
+    tRFC=74,
+    tRFCb=20,
+    tFAW=50,
+    tRCDRD=24,
+    tRCDWR=20,
+    tWTR_L=5,
+    tWTR_S=5,
+    tRTRS=2,
+    tREFI=7800,
+)
 KINDS = {
     "GH_READ": "gh_read",
     "GH_READ_PRECHARGE": "gh_read_p",
@@ -82,18 +103,18 @@ def validate_timing(commands, issues, config):
     ini.read(config)
     t = ini["timing"]
     d = ini["dram_structure"]
-    get = lambda name, default: int(t.get(name, default))
+    get = lambda name: int(t.get(name, TIMING_DEFAULTS[name]))
     banks = int(d["banks_per_group"])
     groups = int(d["bankgroups"])
     burst = (int(d["BL"]) // 2) if int(d["BL"]) else 0
-    al = get("AL", 0)
-    wl = al + get("CWL", 12)
-    rl = al + get("CL", 12)
-    rp = get("tRP", 14)
-    ras = get("tRAS", 34)
-    rtp = al + get("tRTP", 5)
-    wr = wl + burst + get("tWR", 16)
-    cadence = max(burst, get("tCCD_L", 2))
+    al = get("AL")
+    wl = al + get("CWL")
+    rl = al + get("CL")
+    rp = get("tRP")
+    ras = get("tRAS")
+    rtp = al + get("tRTP")
+    wr = wl + burst + get("tWR")
+    cadence = max(burst, get("tCCD_L"))
     errors = []
 
     def fail(channel, cycle, message):
@@ -107,7 +128,14 @@ def validate_timing(commands, issues, config):
         def state(rank, bg, bank):
             return states.setdefault(
                 (rank, bg, bank),
-                dict(row=None, act=0, pre=0, ref=0, **{kind: 0 for kind in DATA}),
+                dict(
+                    row=None,
+                    act=0,
+                    pre=0,
+                    ref=0,
+                    ref_bank=0,
+                    **{kind: 0 for kind in DATA}
+                ),
             )
 
         effects = collections.defaultdict(list)
@@ -145,7 +173,7 @@ def validate_timing(commands, issues, config):
             if kind.startswith("GH_"):
                 if cycle < next_global:
                     fail(channel, cycle, "GH channel cadence")
-                next_global = cycle + max(1, get("tCCD_S", 1))
+                next_global = cycle + max(1, get("tCCD_S"))
         last = -1
         for c in trace:
             cycle = c["cycle"]
@@ -167,15 +195,23 @@ def validate_timing(commands, issues, config):
                 )
                 for g, b in targets:
                     s = state(rank, g, b)
-                    if s["row"] is not None or cycle < s["ref"]:
+                    ref_key = "ref_bank" if kind == "refresh_bank" else "ref"
+                    if s["row"] is not None or cycle < s[ref_key]:
                         fail(channel, cycle, "refresh before bank ready")
-                    delay = (
-                        get("tRFCb", get("tRFC", 260))
-                        if kind == "refresh_bank"
-                        else get("tRFC", 260)
-                    )
-                    s["act"] = max(s["act"], cycle + delay)
-                    s["ref"] = max(s["ref"], cycle + delay)
+                    if kind == "refresh":
+                        s["act"] = max(s["act"], cycle + get("tRFC"))
+                        s["ref"] = max(s["ref"], cycle + get("tRFC"))
+                if kind == "refresh_bank":
+                    # Match ChannelState's applied tables: same_bank is empty;
+                    # the existing same_rank tRFCb table is not dispatched.
+                    for g in range(groups):
+                        for b in range(banks):
+                            if (g, b) != (bg, bank):
+                                other = state(rank, g, b)
+                                other["act"] = max(other["act"], cycle + get("tRFC"))
+                                other["ref_bank"] = max(
+                                    other["ref_bank"], cycle + get("tREFI")
+                                )
                 continue
             if not (0 <= bg < groups and 0 <= bank < banks):
                 fail(channel, cycle, "bank address outside topology")
@@ -185,7 +221,7 @@ def validate_timing(commands, issues, config):
                 if s["row"] is not None or cycle < s["act"]:
                     fail(channel, cycle, "ACT before bank ready")
                 live = windows[rank]
-                while live and live[0] + get("tFAW", 30) <= cycle:
+                while live and live[0] + get("tFAW") <= cycle:
                     live.popleft()
                 live.append(cycle)
                 if len(live) > 4:
@@ -193,13 +229,16 @@ def validate_timing(commands, issues, config):
                 s["row"] = c["row"]
                 s["act"] = max(s["act"], cycle + ras + rp)
                 s["pre"] = max(s["pre"], cycle + ras)
+                for g in range(groups):
+                    for b in range(banks):
+                        if (g, b) != (bg, bank):
+                            other = state(rank, g, b)
+                            other["ref_bank"] = max(other["ref_bank"], cycle + ras + rp)
                 for data in DATA:
                     s[data] = max(
                         s[data],
                         cycle
-                        + get(
-                            "tRCDWR" if data.startswith("pim_write") else "tRCDRD", 14
-                        ),
+                        + get("tRCDWR" if data.startswith("pim_write") else "tRCDRD"),
                     )
             elif kind == "precharge":
                 if s["row"] is None or cycle < s["pre"]:
@@ -207,6 +246,7 @@ def validate_timing(commands, issues, config):
                 s["row"] = None
                 s["act"] = max(s["act"], cycle + rp)
                 s["ref"] = max(s["ref"], cycle + rp)
+                s["ref_bank"] = max(s["ref_bank"], cycle + rp)
             elif kind in DATA:
                 if s["row"] != c["row"] or cycle < s[kind]:
                     fail(
@@ -220,6 +260,7 @@ def validate_timing(commands, issues, config):
                     s["row"] = None
                     s["act"] = max(s["act"], cycle + pre_delay + rp)
                     s["ref"] = max(s["ref"], cycle + pre_delay + rp)
+                    s["ref_bank"] = max(s["ref_bank"], cycle + pre_delay + rp)
                 else:
                     s["pre"] = max(s["pre"], cycle + pre_delay)
                     for data in DATA:
@@ -230,10 +271,10 @@ def validate_timing(commands, issues, config):
                             delay = (
                                 wl
                                 + burst
-                                + get("tWTR_L" if data.endswith("_p") else "tWTR_S", 0)
+                                + get("tWTR_L" if data.endswith("_p") else "tWTR_S")
                             )
                         else:
-                            delay = rl + burst - wl + get("tRTRS", 0)
+                            delay = rl + burst - wl + get("tRTRS")
                         s[data] = max(s[data], cycle + delay)
             else:
                 fail(channel, cycle, "unsupported audit command " + kind)
