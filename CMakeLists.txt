@@ -117,6 +117,7 @@ add_executable(dramsim3test
     tests/test_pim_instructions.cc
     tests/test_pim_instruction_buffer.cc
     tests/test_pim_instruction_sequencer.cc
+    tests/test_pim_instruction_pipeline.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)
@@ -132,6 +133,9 @@ set_tests_properties(dramsim3_unit PROPERTIES
 find_package(PythonInterp 3 REQUIRED)
 add_test(NAME hbnpu_instruction_translation
     COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_instruction_translation.py)
+add_test(NAME hbnpu_instruction_transport
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_instruction_transport.py
+            $<TARGET_FILE:dramsim3main>)
 add_test(
     NAME hbnpu_gh_timing
     COMMAND ${PYTHON_EXECUTABLE} -B

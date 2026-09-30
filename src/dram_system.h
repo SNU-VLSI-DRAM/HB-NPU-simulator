@@ -14,6 +14,7 @@
 #include "pim_execution_state.h"
 #include "pim_tile_executor.h"
 #include "legacy_tile_scheduler.h"
+#include "pim_instruction_sequencer.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -31,7 +32,8 @@ class BaseDRAMSystem {
     void RegisterCallbacks(std::function<void(uint64_t)> read_callback,
                            std::function<void(uint64_t)> write_callback);
     void PrintEpochStats();
-    void PrintStats();
+    virtual void PrintStats();
+    virtual void RecordPimAdmissionStall() {}
     void ResetStats();
 
     virtual bool WillAcceptTransaction() const = 0;
@@ -80,6 +82,10 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool AddTransaction(uint64_t hex_addr, bool is_write) override;
     void ClockTick() override;
     Command GetReadyCommandPIM(Transaction trans, CommandType type);
+    void PrintStats() override;
+    void RecordPimAdmissionStall() override {
+        if (config_.tile_instructions) ++cpu_backpressure_cycles_;
+    }
 
    private:
     void ReturnCompletedTransactions();
@@ -93,6 +99,9 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     PimDataflowConfig pim_config_;
     std::unique_ptr<PimTileExecutor> tile_executor_;
     std::unique_ptr<LegacyTileScheduler> tile_scheduler_;
+    std::unique_ptr<PimInstructionBuffer> instruction_buffer_;
+    std::unique_ptr<PimInstructionSequencer> instruction_sequencer_;
+    uint64_t cpu_backpressure_cycles_ = 0;
 
    public:
     PimExecutionState execution_;

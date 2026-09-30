@@ -2,6 +2,7 @@
 #include "pim_transaction.h"
 #include <assert.h>
 #include <cmath>
+#include "json.hpp"
 namespace dramsim3 {
 
 // alternative way is to assign the id in constructor but this is less
@@ -98,6 +99,10 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
                                  std::function<void(uint64_t)> read_callback,
                                  std::function<void(uint64_t)> write_callback)
     : BaseDRAMSystem(config, output_dir, read_callback, write_callback) {
+    if (config_.tile_instructions) {
+        instruction_buffer_.reset(new PimInstructionBuffer(config_.instruction_capacity));
+        instruction_sequencer_.reset(new PimInstructionSequencer(config_));
+    }
     if (config_.IsHMC()) {
         std::cerr << "Initialized a memory system with an HMC config file!"
                   << std::endl;
@@ -130,10 +135,16 @@ JedecDRAMSystem::~JedecDRAMSystem() {
 
 
 bool JedecDRAMSystem::WillAcceptTransaction() const {
+    if (instruction_buffer_) return instruction_buffer_->CanAcceptWord();
     return pim_trans_queue_.size() < pim_trans_queue_depth_;
 }
 
 bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr) {
+    if (instruction_buffer_) {
+        bool accepted=instruction_buffer_->PushWord(hex_addr);
+        if (accepted) last_req_clk_=clk_;
+        return accepted;
+    }
 // Record trace - Record address trace for debugging or other purposes
 #ifdef ADDR_TRACE
     address_trace_ << std::hex << hex_addr << std::dec << " "
@@ -180,9 +191,24 @@ bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr, bool is_write) {
 void JedecDRAMSystem::ClockTick() {
     ReturnCompletedTransactions();
     bool wait_refresh = CheckRefreshWindow();
-    ProcessPimTransaction();
-    bool is_in_ref = PimCommandsBlockedByRefresh();
-    SchedulePimCommands(wait_refresh, is_in_ref);
+    if (instruction_buffer_) {
+        instruction_buffer_->Tick(clk_);
+        PimTickFeedback feedback;
+        feedback.wait_refresh=wait_refresh;
+        feedback.in_refresh=PimCommandsBlockedByRefresh();
+        feedback.weight_pending=PendingPimSource(PimSource::WEIGHT);
+        feedback.input_pending=PendingPimSource(PimSource::INPUT);
+        feedback.output_pending=PendingPimSource(PimSource::OUTPUT);
+        auto result=instruction_sequencer_->Tick(clk_,*instruction_buffer_,feedback);
+        execution_=instruction_sequencer_->Snapshot();
+        if (execution_.in_pim) for (auto* controller:ctrls_) controller->in_pim=true;
+        DispatchCommands(result.batch);
+        turn_off=instruction_sequencer_->Complete();
+    } else {
+        ProcessPimTransaction();
+        bool is_in_ref = PimCommandsBlockedByRefresh();
+        SchedulePimCommands(wait_refresh, is_in_ref);
+    }
     TickControllers();
     clk_++;
     if (clk_ % config_.epoch_period == 0) {
@@ -215,7 +241,8 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
     // if countdown is lower than pim delay, pause issuing pim commands until refresh is done over all ranks
     bool wait_refresh = false;
     for (size_t i=0; i<ctrls_.size(); i++) {
-        if (ctrls_[i]->pim_refresh_coming() && pim_config_.configured) {
+        if (ctrls_[i]->pim_refresh_coming() &&
+            (pim_config_.configured || (instruction_sequencer_ && execution_.in_pim))) {
             wait_refresh = true;
             // std::cout<<clk_ << "\tWait Refresh\n";
         }
@@ -337,6 +364,38 @@ void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
         const auto& operation = item.second;
         ctrls_[operation.commands.front().Channel()]->EnqueuePimOperation(item.first,operation);
     }
+}
+
+void JedecDRAMSystem::PrintStats() {
+    BaseDRAMSystem::PrintStats();
+    if (!instruction_buffer_) return;
+    const auto& ingress=instruction_buffer_->Stats();
+    const auto& sequence=instruction_sequencer_->Stats();
+    nlohmann::json stats;
+    stats["admitted_words"]=ingress.admitted_words;
+    stats["decoded_instructions"]=ingress.decoded_instructions;
+    stats["raw_high_watermark"]=ingress.raw_high_watermark;
+    stats["slot_high_watermark"]=ingress.slot_high_watermark;
+    stats["partial_packet_cycles"]=ingress.partial_packet_cycles;
+    stats["raw_words"]=instruction_buffer_->RawSize();
+    stats["instruction_slots"]=instruction_buffer_->SlotSize();
+    stats["partial_packet"]=instruction_buffer_->HasPartialPacket();
+    stats["dispatched_instructions"]=sequence.dispatched_instructions;
+    stats["retired_instructions"]=sequence.retired_instructions;
+    stats["compute_resource_stall_cycles"]=sequence.compute_resource_stall_cycles;
+    stats["output_resource_stall_cycles"]=sequence.output_resource_stall_cycles;
+    stats["instruction_starvation_cycles"]=sequence.instruction_starvation_cycles;
+    stats["backend_drained"]=sequence.backend_drained;
+    stats["backend_drain_cycle"]=sequence.backend_drain_cycle;
+    stats["end_completed"]=sequence.end_completed;
+    stats["end_cycle"]=sequence.end_cycle;
+    stats["cpu_backpressure_cycles"]=cpu_backpressure_cycles_;
+    stats["status"]=sequence.end_completed ? "complete" : "incomplete";
+    stats["executor_stage"]=execution_.iw_status;
+    stats["simulated_cycles"]=clk_;
+    std::ofstream out(config_.output_dir+"hbnpu_instruction.json");
+    out << stats.dump(2) << '\n';
+    if (!sequence.end_completed) std::cout << "HB-NPU instruction program incomplete at cycle " << clk_ << '\n';
 }
 
 void JedecDRAMSystem::TickControllers() {
