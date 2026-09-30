@@ -42,6 +42,7 @@ add_library(dramsim3 SHARED
     src/pim_transaction.cc
     src/legacy_tile_scheduler.cc
     src/pim_tile_executor.cc
+    src/pim_instruction.cc
 )
 
 if (THERMAL)
@@ -111,6 +112,7 @@ add_executable(dramsim3test
     tests/test_pim.cc
     tests/test_pim_operations.cc
     tests/test_pim_tiles.cc
+    tests/test_pim_instructions.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)
