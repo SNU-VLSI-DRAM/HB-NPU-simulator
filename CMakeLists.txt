@@ -126,6 +126,8 @@ set_tests_properties(dramsim3_unit PROPERTIES
 )
 
 find_package(PythonInterp 3 REQUIRED)
+add_test(NAME hbnpu_instruction_translation
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_instruction_translation.py)
 add_test(
     NAME hbnpu_gh_timing
     COMMAND ${PYTHON_EXECUTABLE} -B
