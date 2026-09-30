@@ -5,9 +5,9 @@
 #include "pim_kernel_context.h"
 
 namespace dramsim3 {
-enum class PimOpcode : uint8_t { CONFIG=1, STORE=2, TILE_BLOCK=3, END=4 };
+enum class PimInstructionOpcode : uint8_t { CONFIG=1, STORE=2, TILE_BLOCK=3, END=4 };
 struct PimInstructionHeader {
-    PimOpcode opcode = PimOpcode::END;
+    PimInstructionOpcode opcode = PimInstructionOpcode::END;
     uint8_t payload_words = 0;
     uint32_t sequence = 0;
 };

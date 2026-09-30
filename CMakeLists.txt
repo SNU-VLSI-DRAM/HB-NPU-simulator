@@ -44,6 +44,7 @@ add_library(dramsim3 SHARED
     src/pim_tile_executor.cc
     src/pim_instruction.cc
     src/pim_instruction_buffer.cc
+    src/pim_instruction_sequencer.cc
 )
 
 if (THERMAL)
@@ -115,6 +116,7 @@ add_executable(dramsim3test
     tests/test_pim_tiles.cc
     tests/test_pim_instructions.cc
     tests/test_pim_instruction_buffer.cc
+    tests/test_pim_instruction_sequencer.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)

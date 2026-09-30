@@ -15,7 +15,7 @@ int Signed(uint64_t value, uint32_t seq, const char* name) {
     Check(value <= INT_MAX, seq, name);
     return static_cast<int>(value);
 }
-void Kind(const PimInstructionPacket& p, PimOpcode kind) {
+void Kind(const PimInstructionPacket& p, PimInstructionOpcode kind) {
     PimInstructionCodec::EncodeHeader(p.header); // also validates payload length
     Check(p.header.opcode == kind, p.header.sequence, "opcode");
 }
@@ -27,7 +27,7 @@ PimInstructionHeader PimInstructionCodec::DecodeHeader(uint64_t word) {
     Check(((word>>52)&15)==1, h.sequence, "version");
     const unsigned op = (word>>48)&15;
     Check(op>=1 && op<=4, h.sequence, "opcode");
-    h.opcode = static_cast<PimOpcode>(op);
+    h.opcode = static_cast<PimInstructionOpcode>(op);
     h.payload_words = (word>>40)&255;
     const unsigned lengths[] = {0,7,1,2,0};
     Check(h.payload_words == lengths[op], h.sequence, "payload length");
@@ -41,7 +41,7 @@ uint64_t PimInstructionCodec::EncodeHeader(const PimInstructionHeader& h) {
     return word;
 }
 PimKernelContext PimInstructionCodec::DecodeConfig(const PimInstructionPacket& p, const Config& hw) {
-    Kind(p, PimOpcode::CONFIG);
+    Kind(p, PimInstructionOpcode::CONFIG);
     auto s = p.header.sequence;
     PimKernelContext c;
     c.m = Signed(uint32_t(p.payload[0]),s,"M");
@@ -88,7 +88,7 @@ PimKernelContext PimInstructionCodec::DecodeConfig(const PimInstructionPacket& p
 }
 PimComputeBlock PimInstructionCodec::DecodeCompute(const PimInstructionPacket& p,
         const PimKernelContext& c, const Config& hw) {
-    Kind(p,PimOpcode::TILE_BLOCK);
+    Kind(p,PimInstructionOpcode::TILE_BLOCK);
     auto s=p.header.sequence;
     Check((p.payload[1]>>32)==0,s,"reserved TILE bits");
     PimComputeBlock b;
@@ -107,7 +107,7 @@ PimComputeBlock PimInstructionCodec::DecodeCompute(const PimInstructionPacket& p
 }
 PimOutputBlock PimInstructionCodec::DecodeOutput(const PimInstructionPacket& p,
         const PimKernelContext& c, const Config&) {
-    Kind(p,PimOpcode::STORE);
+    Kind(p,PimInstructionOpcode::STORE);
     const auto& d=c.dataflow;
     const int mt=d.df ? d.m_tile_size/128*d.mcf : d.m_tile_size;
     const int m=d.df ? std::max(1,c.m*d.mcf/128) : c.m;
