@@ -5,6 +5,8 @@ paper, using DRAMsim3 for DRAM timing and energy accounting. Python utilities
 generate OPT prefill and decode workloads and encode their kernel
 configurations into PIM transaction traces. The simulator schedules the
 corresponding Local HB (LH) and Global HB (GH) bank operations dynamically.
+An opt-in instruction mode instead accepts explicit tile packets generated
+offline, with CPU backpressure and a bounded instruction buffer.
 
 If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870),:
 ```
@@ -114,9 +116,9 @@ which use a relative tolerance of `1e-6` plus an absolute tolerance of `1e-9`.
 Ordinary test runs never update goldens. Golden changes must be explicit via
 `tests/regression/run_regression.py --update-golden` and reviewed separately.
 
-The full suite contains seven CTest groups, including 50 C++ test cases, timing
-checks, workload parsing, five quick fixtures, a 46-kernel OPT window, and tests
-of the bounded two-binary comparison tool.
+The full suite includes C++ execution and packet tests, timing checks, workload
+parsing, five exact legacy quick fixtures, a 46-kernel OPT window, CPU instruction
+transport tests, and both exact and instruction-mode comparison tools.
 A broader comparison across four OPT model sizes preserved per-bank data
 streams in all 159 completed kernel pairs. The remaining OPT-66B kernel matched
 over a 100,000-cycle common prefix; full completion of that case remains
@@ -141,6 +143,43 @@ and logical command records exactly, including cycles, and prints the first
 difference. It retains raw traces and a JSON result, applies the same energy
 tolerance as the regressions, and distinguishes full completion from a matching
 bounded run. It currently expects the eight-channel configuration used above.
+
+### Execute tile instructions
+
+Legacy execution remains the default. To use explicit tile instructions, copy
+the supplied HBM INI file and add:
+
+```ini
+[hbnpu]
+execution_mode = tile_instructions
+instruction_capacity = 16
+```
+
+Compile one existing workload, then run its instruction trace with that copy:
+
+```bash
+mkdir -p output/tile-example
+python3 gen_tile_trace.py \
+  -w workloads/OPT-2.7B/decode/createQKV \
+  -s configs/HBM2_8Gb_x128_pim.ini \
+  -t output/tile-example/instructions.trace
+./build/dramsim3main /path/to/instruction-mode.ini \
+  -t output/tile-example/instructions.trace -c 100000 \
+  -o output/tile-example
+```
+
+Each 64-bit word is one ordinary PIM transaction. The CPU retries when the
+32-word ingress FIFO is full; it does not wait for each tile to finish.
+The sequencer dispatches `CONFIG`, `STORE`, fused `TILE_BLOCK`, and `END`
+instructions. `TILE_BLOCK` includes resident loading and streamed compute;
+separate load/compute/vector opcodes are not supported. `STORE` arms an output
+descriptor before its compute group but cannot write before data is ready.
+
+Check `hbnpu_instruction.json` in the output directory for `end_completed`,
+buffer occupancy, CPU backpressure, and starvation counters. A cycle-capped or
+truncated program is reported as incomplete, not successful. Instruction-mode
+cycle counts include upload and dispatch delays; legacy exact regressions are
+unchanged. See [the packet format and execution rules](docs/pim-instruction-format.md).
 
 ### Run the OPT evaluation
 
