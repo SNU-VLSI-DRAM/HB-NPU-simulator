@@ -30,17 +30,17 @@ PimInstructionHeader PimInstructionCodec::DecodeHeader(uint64_t word) {
     Check((word >> 56) == 0xb7, h.sequence, "magic");
     Check(((word >> 52) & 15) == 1, h.sequence, "version");
     const unsigned op = (word >> 48) & 15;
-    Check(op >= 1 && op <= 4, h.sequence, "opcode");
+    Check(op >= 1 && op <= 6, h.sequence, "opcode");
     h.opcode = static_cast<PimInstructionOpcode>(op);
     h.payload_words = (word >> 40) & 255;
-    const unsigned lengths[] = {0, 7, 1, 2, 0};
+    const unsigned lengths[] = {0, 7, 1, 2, 0, 2, 2};
     Check(h.payload_words == lengths[op], h.sequence, "payload length");
     Check(((word >> 32) & 255) == 0, h.sequence, "reserved header bits");
     return h;
 }
 uint64_t PimInstructionCodec::EncodeHeader(const PimInstructionHeader& h) {
     Check(static_cast<unsigned>(h.opcode) >= 1 &&
-              static_cast<unsigned>(h.opcode) <= 4,
+              static_cast<unsigned>(h.opcode) <= 6,
           h.sequence, "opcode");
     uint64_t word = 0xb710000000000000ULL | (uint64_t(h.opcode) << 48) |
                     (uint64_t(h.payload_words) << 40) | h.sequence;
@@ -113,7 +113,11 @@ PimKernelContext PimInstructionCodec::DecodeConfig(
 PimComputeBlock PimInstructionCodec::DecodeCompute(
     const PimInstructionPacket& p, const PimKernelContext& c,
     const Config& hw) {
-    Kind(p, PimInstructionOpcode::TILE_BLOCK);
+    EncodeHeader(p.header);
+    Check(p.header.opcode == PimInstructionOpcode::TILE_BLOCK ||
+              p.header.opcode == PimInstructionOpcode::LOAD_INPUTS ||
+              p.header.opcode == PimInstructionOpcode::TILE_GEMM,
+          p.header.sequence, "tile opcode");
     auto s = p.header.sequence;
     Check((p.payload[1] >> 32) == 0, s, "reserved TILE bits");
     PimComputeBlock b;

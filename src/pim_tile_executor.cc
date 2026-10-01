@@ -40,10 +40,29 @@ void PimTileExecutor::LoadCompute(const PimComputeBlock& block) {
         throw std::invalid_argument("PIM compute descriptor geometry or boundary flags");
     compute_ = block;
     compute_active_ = true;
+    compute_requested_ = true;
     compute_exhausted_ = false;
     state_.m_it = block.m_origin;
     state_.n_it = block.n_origin;
     state_.k_tile_it = block.k_origin / k_tile;
+}
+
+void PimTileExecutor::LoadResident(const PimComputeBlock& block) {
+    LoadCompute(block);
+    compute_requested_ = false;
+}
+
+void PimTileExecutor::StartCompute(const PimComputeBlock& block) {
+    if (!CanStartCompute() ||
+        block.m_origin != compute_.m_origin || block.n_origin != compute_.n_origin ||
+        block.k_origin != compute_.k_origin || block.m_extent != compute_.m_extent ||
+        block.n_extent != compute_.n_extent || block.k_extent != compute_.k_extent ||
+        block.first_k != compute_.first_k || block.final_k != compute_.final_k ||
+        block.last_block != compute_.last_block)
+        throw std::invalid_argument("PIM GEMM requires matching unconsumed resident load");
+    // Dispatch can happen while resident reads are pending. The stage-1 gate
+    // prevents streaming until both the load and this explicit request exist.
+    compute_requested_ = true;
 }
 
 bool PimTileExecutor::CanAcceptOutput() const {
@@ -115,6 +134,7 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
                     (N_tile_size == N_tile_size_per_bank || state.n_it % N_tile_size != 0)) {
                     state.n_it = N_tile_size*N_tile_it;
                     ++state.iw_status;
+                    result.events.push_back(PimProgress::ResidentTileReady);
                 }
             }
             if (state.iw_status != 0 || state.weight_pending || wait_refresh) break;
@@ -141,6 +161,7 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
             break;
         }
         case 1:
+            if (!compute_requested_) break;
             ++state.iw_status;
             state.vpu_cnt = 1;
             break;

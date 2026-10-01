@@ -10,7 +10,9 @@ enum class PimInstructionOpcode : uint8_t {
     CONFIG = 1,
     STORE = 2,
     TILE_BLOCK = 3,
-    END = 4
+    END = 4,
+    LOAD_INPUTS = 5,
+    TILE_GEMM = 6
 };
 struct PimInstructionHeader {
     PimInstructionOpcode opcode = PimInstructionOpcode::END;

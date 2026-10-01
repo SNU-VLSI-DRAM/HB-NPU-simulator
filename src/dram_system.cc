@@ -383,6 +383,7 @@ void JedecDRAMSystem::PrintStats() {
     stats["dispatched_instructions"]=sequence.dispatched_instructions;
     stats["retired_instructions"]=sequence.retired_instructions;
     stats["compute_resource_stall_cycles"]=sequence.compute_resource_stall_cycles;
+    stats["load_resource_stall_cycles"]=sequence.load_resource_stall_cycles;
     stats["output_resource_stall_cycles"]=sequence.output_resource_stall_cycles;
     stats["instruction_starvation_cycles"]=sequence.instruction_starvation_cycles;
     stats["backend_drained"]=sequence.backend_drained;

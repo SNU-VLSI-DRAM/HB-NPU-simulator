@@ -17,7 +17,7 @@ time. Payload words are never interpreted as legacy configuration transactions.
 | --- | --- |
 | 63:56 | Magic `0xB7` |
 | 55:52 | Version `1` |
-| 51:48 | Opcode: CONFIG=1, STORE=2, TILE_BLOCK=3, END=4 |
+| 51:48 | Opcode: CONFIG=1, STORE=2, TILE_BLOCK=3, END=4, LOAD_INPUTS=5, TILE_GEMM=6 |
 | 47:40 | Number of payload words |
 | 39:32 | Reserved, must be zero |
 | 31:0 | Sequence number, starting at zero, without gaps or wrap |
@@ -38,7 +38,8 @@ Kernel coordinates use the same transformed M/N/K layout as legacy traces.
 CONFIG is immutable and may occur only once.
 
 STORE has one payload word: output M origin in low 32 bits and output N-tile
-index in high 32 bits. TILE_BLOCK has two payload words: M/N origins packed
+index in high 32 bits. TILE_BLOCK, LOAD_INPUTS and TILE_GEMM each have two
+payload words: M/N origins packed
 low/high 32 bits, followed by K origin in low 32 bits with high bits zero.
 Extents and boundary flags are derived from those explicit coordinates.
 END has no payload. For example, END at sequence 3 is `0xb714000000000003`.
@@ -50,13 +51,43 @@ Programs contain one kernel and follow this profile:
 ```text
 CONFIG
 STORE output group 0
-TILE_BLOCK group 0, K block 0
-TILE_BLOCK group 0, remaining K blocks
+LOAD_INPUTS group 0, K block 0
+TILE_GEMM group 0, K block 0
+LOAD_INPUTS / TILE_GEMM pairs for remaining K blocks
 STORE output group 1
-TILE_BLOCK group 1, all K blocks
+LOAD_INPUTS / TILE_GEMM pairs for all K blocks
 ...
 END
 ```
+
+LOAD_INPUTS reads the resident operand from CONFIG's resident base row, using
+the existing GH weight-loading stage. TILE_GEMM consumes that resident tile
+and streams the other operand from CONFIG's input base row through GH or LH.
+Both packets must specify the same M/N/K origins. For example, load sequence 2
+and GEMM sequence 3 for origins (0,0,0) are:
+
+```text
+0xb715020000000002 PIM 10
+0x0 PIM 11
+0x0 PIM 12
+0xb716020000000003 PIM 13
+0x0 PIM 14
+0x0 PIM 15
+```
+
+GEMM dispatch may occur before the resident load finishes; execution waits for
+all addressed channels to issue their resident data commands. Load retirement
+occurs at resident-tile readiness. Without a matching GEMM, the resident tile
+remains ready but no streamed reads or computation start. A missing load,
+duplicate load, mismatched tile, or END in place of GEMM is rejected before
+resource waits can hide the error. A truncated upload remains incomplete.
+
+There is one active resident tile, with no extra buffering, prefetch or reuse
+across tiles. Existing output overlap and stage-shift timing remain in effect.
+For compatibility, a fused TILE_BLOCK can replace any complete LOAD_INPUTS /
+TILE_GEMM pair; it cannot appear between the two. Its wire encoding and behavior
+are unchanged. Older instruction-mode binaries reject the new opcodes; use
+`--fused` when generating traces for those binaries.
 
 STORE dispatch reserves the output descriptor; actual writes wait for final-K
 data readiness. Compute dispatch does not wait for that STORE to retire.
@@ -94,15 +125,18 @@ or a partial packet at the cycle limit produces an incomplete result.
 `gen_tile_trace.py -w WORKLOAD -s CONFIG -t TRACE` compiles one existing
 workload without running DRAMsim. Optional `--row-addr` matches the legacy base
 row override; `--start-cycle` and `--word-period` control upload opportunities.
-Existing destinations are refused unless `--overwrite` is supplied.
+Existing destinations are refused unless `--overwrite` is supplied. The default
+is split load/GEMM packets; `--fused` emits compatible TILE_BLOCK packets.
 
 Instruction mode writes `hbnpu_instruction.json` alongside ordinary statistics.
 It reports admitted words; decoded, dispatched and retired instructions; raw
-and packet-slot high watermarks; CPU capacity stalls; compute/output resource
+and packet-slot high watermarks; CPU capacity stalls; load/compute/output resource
 stalls; partial-packet and instruction-starvation cycles; backend drain and END
 cycles; and incomplete state. A cycle timestamp is valid only when its matching
 `backend_drained` or `end_completed` flag is true. Stall categories can overlap;
-do not add them as an exclusive latency breakdown.
+do not add them as an exclusive latency breakdown. Load-resource stalls mean
+the previous tile still owns the resident slot; a ready load waiting for an
+unavailable GEMM packet contributes to instruction starvation.
 
 ## Comparing executions
 

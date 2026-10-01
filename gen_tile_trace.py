@@ -12,11 +12,14 @@ def main():
     parser.add_argument("--start-cycle", type=int, default=0)
     parser.add_argument("--word-period", type=int, default=1)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--fused", action="store_true", help="emit compatible fused TILE_BLOCK packets"
+    )
     args = parser.parse_args()
     try:
         context = load_workload(args.w, args.s, args.row_addr)
         write_trace(
-            compile_kernel(context),
+            compile_kernel(context, fused=args.fused),
             args.t,
             args.start_cycle,
             args.word_period,

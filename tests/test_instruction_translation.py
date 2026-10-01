@@ -43,6 +43,16 @@ def kernel(**kwargs):
 
 
 class TranslationTest(unittest.TestCase):
+    def test_default_program_separates_resident_load_and_streamed_gemm(self):
+        packets = list(compile_kernel(kernel()))
+        self.assertEqual([p.opcode for p in packets], [1, 2, 5, 6, 5, 6, 4])
+        self.assertEqual([p.sequence for p in packets], list(range(7)))
+        self.assertEqual(
+            [p.payload for p in packets[2:6]], [(0, 0), (0, 0), (0, 128), (0, 128)]
+        )
+        self.assertEqual(encode_packet(packets[2]), (0xB715020000000002, 0, 0))
+        self.assertEqual(encode_packet(packets[3]), (0xB716020000000003, 0, 0))
+
     def test_golden_words_and_store_first_profile(self):
         golden = json.loads(
             (ROOT / "tests/regression/fixtures/instruction_words.json").read_text()
@@ -50,7 +60,7 @@ class TranslationTest(unittest.TestCase):
         for item in golden:
             words = tuple(int(w, 16) for w in item["words"])
             self.assertEqual(encode_packet(decode_packet(words)), words)
-        packets = list(compile_kernel(kernel()))
+        packets = list(compile_kernel(kernel(), fused=True))
         self.assertEqual([p.opcode for p in packets], [1, 2, 3, 3, 4])
         self.assertEqual([p.sequence for p in packets], list(range(5)))
         self.assertEqual(
@@ -62,7 +72,7 @@ class TranslationTest(unittest.TestCase):
     def test_partial_tiles_enumerate_m_n_k_without_simulation(self):
         packets = list(compile_kernel(kernel(m=65, n=129, k=130, m_tile=64)))
         self.assertEqual(
-            [p.payload for p in packets if p.opcode == 3],
+            [p.payload for p in packets if p.opcode == 6],
             [
                 (0, 0),
                 (0, 128),

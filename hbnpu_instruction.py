@@ -4,7 +4,7 @@ import configparser
 from dataclasses import dataclass
 from pathlib import Path
 
-LENGTHS = {1: 7, 2: 1, 3: 2, 4: 0}
+LENGTHS = {1: 7, 2: 1, 3: 2, 4: 0, 5: 2, 6: 2}
 INT_MAX = (1 << 31) - 1
 
 
@@ -172,7 +172,7 @@ def load_workload(workload, config, row_addr=-1):
     return c
 
 
-def compile_kernel(c):
+def compile_kernel(c, *, fused=False):
     kt, mo, ot, no, _ = _geometry(c)
     config = (
         c.m | c.n << 32,
@@ -192,9 +192,10 @@ def compile_kernel(c):
             _integer(sequence, 0, (1 << 32) - 1, "sequence")
             yield Packet(2, sequence, ((group // no) * ot | (group % no) << 32,))
             for k in range(0, c.k, kt):
-                sequence += 1
-                _integer(sequence, 0, (1 << 32) - 1, "sequence")
-                yield Packet(3, sequence, (m | n << 32, k))
+                for opcode in (3,) if fused else (5, 6):
+                    sequence += 1
+                    _integer(sequence, 0, (1 << 32) - 1, "sequence")
+                    yield Packet(opcode, sequence, (m | n << 32, k))
             group += 1
     sequence += 1
     _integer(sequence, 0, (1 << 32) - 1, "sequence")

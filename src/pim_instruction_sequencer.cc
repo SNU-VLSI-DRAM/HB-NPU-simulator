@@ -19,6 +19,8 @@ void PimInstructionSequencer::Dispatch(uint64_t cycle,
         if (executor_ && !Complete() &&
             ((expected_ == PimInstructionOpcode::TILE_BLOCK &&
               executor_->CanAcceptCompute()) ||
+             (expected_ == PimInstructionOpcode::TILE_GEMM &&
+              executor_->Snapshot().iw_status == 1) ||
              (expected_ == PimInstructionOpcode::STORE &&
               executor_->CanAcceptOutput()) ||
              (expected_ == PimInstructionOpcode::END &&
@@ -27,8 +29,12 @@ void PimInstructionSequencer::Dispatch(uint64_t cycle,
         return;
     }
     Require(!Complete(), *p, "instruction after END");
-    Require(p->header.opcode == expected_, *p,
-            "opcode violates CONFIG / STORE / TILE group / END profile");
+    Require(p->header.opcode == expected_ ||
+                (expected_ == PimInstructionOpcode::TILE_BLOCK &&
+                 p->header.opcode == PimInstructionOpcode::LOAD_INPUTS),
+            *p,
+            "opcode violates CONFIG / STORE / TILE or LOAD-GEMM pair / END "
+            "profile");
     switch (p->header.opcode) {
         case PimInstructionOpcode::CONFIG: {
             context_.reset(new PimKernelContext(
@@ -64,6 +70,8 @@ void PimInstructionSequencer::Dispatch(uint64_t cycle,
             expected_ = PimInstructionOpcode::TILE_BLOCK;
             break;
         }
+        case PimInstructionOpcode::LOAD_INPUTS:
+        case PimInstructionOpcode::TILE_GEMM:
         case PimInstructionOpcode::TILE_BLOCK: {
             auto block =
                 PimInstructionCodec::DecodeCompute(*p, *context_, config_);
@@ -73,11 +81,24 @@ void PimInstructionSequencer::Dispatch(uint64_t cycle,
                     uint64_t(block.n_origin) == group_ % n_groups_ * 128 &&
                     block.k_origin == expected_k_,
                 *p, "compute descriptor order");
-            if (!executor_->CanAcceptCompute()) {
-                ++stats_.compute_resource_stall_cycles;
-                return;
+            if (p->header.opcode == PimInstructionOpcode::TILE_GEMM) {
+                executor_->StartCompute(block);
+            } else {
+                if (!executor_->CanAcceptCompute()) {
+                    if (p->header.opcode == PimInstructionOpcode::LOAD_INPUTS)
+                        ++stats_.load_resource_stall_cycles;
+                    else
+                        ++stats_.compute_resource_stall_cycles;
+                    return;
+                }
+                if (p->header.opcode == PimInstructionOpcode::LOAD_INPUTS) {
+                    executor_->LoadResident(block);
+                    load_active_ = true;
+                    expected_ = PimInstructionOpcode::TILE_GEMM;
+                    break;
+                }
+                executor_->LoadCompute(block);
             }
-            executor_->LoadCompute(block);
             compute_active_ = true;
             compute_sequence_ = p->header.sequence;
             if (block.final_k) {
@@ -85,8 +106,10 @@ void PimInstructionSequencer::Dispatch(uint64_t cycle,
                 ++group_;
                 expected_ = group_ == groups_ ? PimInstructionOpcode::END
                                               : PimInstructionOpcode::STORE;
-            } else
+            } else {
                 expected_k_ += block.k_extent;
+                expected_ = PimInstructionOpcode::TILE_BLOCK;
+            }
             break;
         }
         case PimInstructionOpcode::END:
@@ -113,6 +136,10 @@ PimTickResult PimInstructionSequencer::Tick(uint64_t cycle,
         ++stats_.retired_instructions;
     }
     for (auto event : result.events) {
+        if (event == PimProgress::ResidentTileReady && load_active_) {
+            load_active_ = false;
+            ++stats_.retired_instructions;
+        }
         if (event == PimProgress::OutputBlockIssued) {
             if (!output_active_)
                 throw std::logic_error(

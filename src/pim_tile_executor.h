@@ -11,7 +11,7 @@ struct PimTickFeedback {
     bool weight_pending = false, input_pending = false, output_pending = false;
 };
 enum class PimProgress {
-    ResidentVectorIssued, InputVectorIssued, BlockStreamingExhausted,
+    ResidentVectorIssued, ResidentTileReady, InputVectorIssued, BlockStreamingExhausted,
     OutputStageReleased, OutputBlockIssued, PipelineDrained
 };
 struct PimTickResult {
@@ -31,6 +31,9 @@ class PimTileExecutor {
     PimTickResult Tick(uint64_t clk, const PimTickFeedback&, const PimDescriptorSource&);
     bool CanAcceptCompute() const;
     void LoadCompute(const PimComputeBlock&);
+    void LoadResident(const PimComputeBlock&);
+    void StartCompute(const PimComputeBlock&);
+    bool CanStartCompute() const { return compute_active_ && !compute_requested_; }
     bool CanAcceptOutput() const;
     void LoadOutput(const PimOutputBlock&);
     PimExecutionState Snapshot() const { return state_; }
@@ -43,6 +46,7 @@ class PimTileExecutor {
     PimComputeBlock compute_;
     PimOutputBlock output_;
     bool compute_active_ = false, output_active_ = false;
+    bool compute_requested_ = false;
     bool compute_exhausted_ = false, output_exhausted_ = false;
 };
 }  // namespace dramsim3

@@ -170,10 +170,15 @@ python3 gen_tile_trace.py \
 
 Each 64-bit word is one ordinary PIM transaction. The CPU retries when the
 32-word ingress FIFO is full; it does not wait for each tile to finish.
-The sequencer dispatches `CONFIG`, `STORE`, fused `TILE_BLOCK`, and `END`
-instructions. `TILE_BLOCK` includes resident loading and streamed compute;
-separate load/compute/vector opcodes are not supported. `STORE` arms an output
+The translator emits `CONFIG`, `STORE`, `LOAD_INPUTS`, `TILE_GEMM`, and `END`.
+`LOAD_INPUTS` loads the resident operand (the executor's weight-loading stage);
+`TILE_GEMM` streams the other operand from banks while computing. GEMM can be
+dispatched while its matching load is pending, but cannot stream until that
+load finishes. Loading alone never starts GEMM. `STORE` arms an output
 descriptor before its compute group but cannot write before data is ready.
+Existing fused `TILE_BLOCK` packets remain supported; use `--fused` with the
+translator to generate them. Separate vector-processing instructions are not
+supported, and no extra resident buffer or cross-tile reuse is modeled.
 
 Check `hbnpu_instruction.json` in the output directory for `end_completed`,
 buffer occupancy, CPU backpressure, and starvation counters. A cycle-capped or
