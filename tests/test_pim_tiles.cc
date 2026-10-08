@@ -1,8 +1,8 @@
 #include <stdexcept>
 #include <algorithm>
 #include "catch.hpp"
-#include "legacy_tile_scheduler.h"
-#include "pim_tile_executor.h"
+#include "hbnpu/legacy_tile_scheduler.h"
+#include "hbnpu/pim_tile_executor.h"
 
 using namespace dramsim3;
 namespace dramsim3 {

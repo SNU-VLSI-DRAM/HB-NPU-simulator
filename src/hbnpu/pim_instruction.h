@@ -3,7 +3,7 @@
 #include <array>
 
 #include "configuration.h"
-#include "pim_kernel_context.h"
+#include "hbnpu/pim_kernel_context.h"
 
 namespace dramsim3 {
 enum class PimInstructionOpcode : uint8_t {

@@ -281,6 +281,127 @@ def validate_timing(commands, issues, config):
     return errors
 
 
+def validate_rows(commands, issues, rows, config, complete=True):
+    """Check completed row contracts against actual physical/logical traces.
+
+    Startup time may vary; no shifting, missing beats, other channel commands,
+    or channel skew is accepted inside a launched interval. A capped final row
+    is not claimed as a completed predictable interval.
+    """
+    ini = configparser.ConfigParser()
+    ini.read(config)
+    d, t = ini["dram_structure"], ini["timing"]
+    channels = int(ini["system"]["channels"])
+    banks, groups = int(d["banks_per_group"]), int(d["bankgroups"])
+    bl = int(d["BL"])
+    columns = int(d["columns"]) * 2 // (bl or 4)
+    ccd_s, ccd_l = int(t.get("tCCD_S", 4)), int(t.get("tCCD_L", 6))
+    physical, logical = {}, {}
+    for ch in range(channels):
+        physical[ch], logical[ch] = collections.defaultdict(
+            list
+        ), collections.defaultdict(list)
+        for c in commands.get(str(ch), []):
+            physical[ch][c["cycle"]].append(c)
+        for i in issues.get(str(ch), []):
+            logical[ch][i["cycle"]].append(i)
+    errors, covered = [], set()
+
+    def fail(message):
+        if len(errors) < 30:
+            errors.append(message)
+
+    previous_end = -1
+    for index, row in enumerate(rows):
+        start, end = row["start_cycle"], row["last_issue_cycle"]
+        vectors, width = row["vectors"], row["operations_per_vector"]
+        local = width == 1
+        period = max(bl // 2, ccd_l, width * (1 if local else ccd_s))
+        expected_end = start + (vectors - 1) * period + (width - 1) * ccd_s
+        if (
+            width not in (1, 2)
+            or not 0 < vectors <= columns
+            or row["first_column"] < 0
+            or row["first_column"] + vectors > columns
+            or row["vector_period"] != period
+            or end != expected_end
+            or row["id"] != index
+            or start <= previous_end
+            or row["request_cycle"] > start
+        ):
+            fail("invalid row contract {}".format(index))
+            continue
+        previous_end = end
+        beats = {}
+        for v in range(vectors):
+            for slot in range(width):
+                targets = (
+                    {(g, b) for g in range(groups) for b in range(banks)}
+                    if local
+                    else {(slot * 8 // banks, 1)}
+                )
+                beats[start + v * period + slot * ccd_s] = (v, targets)
+        covered.update(range(start, end + 1))
+        for cycle in range(start, end + 1):
+            for ch in range(channels):
+                actual, issued = physical[ch][cycle], logical[ch][cycle]
+                if cycle not in beats:
+                    if actual or issued:
+                        fail(
+                            "row {} channel {}: command in reserved cadence gap".format(
+                                index, ch
+                            )
+                        )
+                    continue
+                v, targets = beats[cycle]
+                prefix = "lh_read" if local else "gh_read"
+                valid = (
+                    len(actual) == len(targets)
+                    and {(c["bankgroup"], c["bank"]) for c in actual} == targets
+                    and all(
+                        c["kind"] in (prefix, prefix + "_p")
+                        and (not c["kind"].endswith("_p") or v == vectors - 1)
+                        and c["channel"] == ch
+                        and c["rank"] == 0
+                        and c["row"] == row["row"]
+                        and c["column"] == row["first_column"] + v
+                        for c in actual
+                    )
+                )
+                expected_kind = prefix.upper() + (
+                    "_PRECHARGE" if actual and actual[0]["kind"].endswith("_p") else ""
+                )
+                valid = (
+                    valid
+                    and len(issued) == 1
+                    and issued[0]["kind"] == expected_kind
+                    and {tuple(target) for target in issued[0]["targets"]} == targets
+                )
+                if not valid:
+                    fail(
+                        "row {} channel {} cycle {}: stream beat mismatch".format(
+                            index, ch, cycle
+                        )
+                    )
+    for ch, trace in commands.items():
+        for c in trace:
+            is_input = c["kind"].startswith("lh_read") or (
+                c["kind"].startswith("gh_read")
+                and c["bankgroup"] * banks + c["bank"] in (1, 9)
+            )
+            if (
+                is_input
+                and c["cycle"] not in covered
+                and (complete or c["cycle"] <= previous_end)
+            ):
+                fail(
+                    "channel {} cycle {}: input outside a row contract".format(
+                        ch, c["cycle"]
+                    )
+                )
+    return errors
+
+
 def legacy_context(trace, config):
     """Test-only launch extraction; never consumes observed DRAM commands."""
     records = [
@@ -378,7 +499,13 @@ def run_one(binary, config, trace, output, cycles, timeout):
     complete = metrics.get(
         "end_completed", "Turn off PIM" in (output / "run.log").read_text()
     )
-    return commands, issues, complete, int(stats["0"]["num_cycles"]), metrics
+    row_path = output / "hbnpu_rows.jsonl"
+    rows = (
+        [json.loads(line) for line in row_path.read_text().splitlines()]
+        if row_path.exists()
+        else []
+    )
+    return commands, issues, complete, int(stats["0"]["num_cycles"]), metrics, rows
 
 
 def configparser_value(path, section, key):
@@ -460,10 +587,24 @@ def main():
             )
             report["reference_timing_errors"] = validate_timing(a[0], a[1], args.config)
             report["candidate_timing_errors"] = validate_timing(b[0], b[1], args.config)
+            report["candidate_row_errors"] = (
+                validate_rows(b[0], b[1], b[5], args.config, b[2])
+                if b[4].get("row_lockstep")
+                else []
+            )
+            report["completed_row_contracts"] = len(b[5])
+            if (
+                b[4].get("row_lockstep")
+                and len(b[5]) != b[4]["row_operations_completed"]
+            ):
+                report["candidate_row_errors"].append(
+                    "row completion metrics/trace mismatch"
+                )
             report["passed"] = (
                 report["data_equal"]
                 and not report["candidate_timing_errors"]
                 and not report["reference_timing_errors"]
+                and not report["candidate_row_errors"]
             )
         except (ValueError, RuntimeError, OSError, subprocess.TimeoutExpired) as error:
             report["error"] = str(error)

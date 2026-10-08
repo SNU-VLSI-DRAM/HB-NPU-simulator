@@ -39,12 +39,14 @@ add_library(dramsim3 SHARED
     src/simple_stats.cc
     src/timing.cc
     src/memory_system.cc
-    src/pim_transaction.cc
-    src/legacy_tile_scheduler.cc
-    src/pim_tile_executor.cc
-    src/pim_instruction.cc
-    src/pim_instruction_buffer.cc
-    src/pim_instruction_sequencer.cc
+    src/hbnpu/pim_transaction.cc
+    src/hbnpu/legacy_tile_scheduler.cc
+    src/hbnpu/pim_tile_executor.cc
+    src/hbnpu/pim_row_operation.cc
+    src/hbnpu/pim_row_scheduler.cc
+    src/hbnpu/pim_instruction.cc
+    src/hbnpu/pim_instruction_buffer.cc
+    src/hbnpu/pim_instruction_sequencer.cc
 )
 
 if (THERMAL)
@@ -83,7 +85,7 @@ if (ADDR_TRACE)
 endif (ADDR_TRACE)
 
 
-target_include_directories(dramsim3 INTERFACE src)
+target_include_directories(dramsim3 PUBLIC src)
 target_compile_options(dramsim3 PRIVATE -Wall)
 target_link_libraries(dramsim3 PRIVATE inih format)
 set_target_properties(dramsim3 PROPERTIES
@@ -118,6 +120,7 @@ add_executable(dramsim3test
     tests/test_pim_instruction_buffer.cc
     tests/test_pim_instruction_sequencer.cc
     tests/test_pim_instruction_pipeline.cc
+    tests/test_pim_rows.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)

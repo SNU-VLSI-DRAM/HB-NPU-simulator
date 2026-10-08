@@ -3,7 +3,7 @@
 
 #include "catch.hpp"
 #include "json.hpp"
-#include "pim_instruction.h"
+#include "hbnpu/pim_instruction.h"
 
 using namespace dramsim3;
 namespace {

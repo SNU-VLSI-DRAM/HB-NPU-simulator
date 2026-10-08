@@ -1,7 +1,7 @@
 #include <vector>
 
 #include "catch.hpp"
-#include "pim_instruction_sequencer.h"
+#include "hbnpu/pim_instruction_sequencer.h"
 using namespace dramsim3;
 namespace {
 std::vector<uint64_t> Program(bool end = true, bool multi = false) {

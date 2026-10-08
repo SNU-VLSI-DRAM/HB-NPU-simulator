@@ -1,5 +1,5 @@
 #include "dram_system.h"
-#include "pim_transaction.h"
+#include "hbnpu/pim_transaction.h"
 #include <assert.h>
 #include <cmath>
 #include "json.hpp"
@@ -118,6 +118,8 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
 #endif  // THERMAL
     }
 
+    if (config_.row_lockstep)
+        row_scheduler_.reset(new PimRowScheduler(config_, ctrls_));
     int banks =  config_.ranks * config_.bankgroups * config_.banks_per_group;
     // std::cout<<"rank: "<<config_.ranks<<" bgs: "<<config_.bankgroups<<" bpg: "<<config_.banks_per_group<<std::endl;
     for (auto i = 0; i < config_.channels; i++) {
@@ -190,6 +192,7 @@ bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr, bool is_write) {
 
 void JedecDRAMSystem::ClockTick() {
     ReturnCompletedTransactions();
+    if (row_scheduler_) row_scheduler_->Tick(clk_);
     bool wait_refresh = CheckRefreshWindow();
     if (instruction_buffer_) {
         instruction_buffer_->Tick(clk_);
@@ -199,10 +202,12 @@ void JedecDRAMSystem::ClockTick() {
         feedback.weight_pending=PendingPimSource(PimSource::WEIGHT);
         feedback.input_pending=PendingPimSource(PimSource::INPUT);
         feedback.output_pending=PendingPimSource(PimSource::OUTPUT);
+        if (row_scheduler_) feedback.row_vectors_completed=row_scheduler_->CompletedVectors();
         auto result=instruction_sequencer_->Tick(clk_,*instruction_buffer_,feedback);
         execution_=instruction_sequencer_->Snapshot();
         if (execution_.in_pim) for (auto* controller:ctrls_) controller->in_pim=true;
         DispatchCommands(result.batch);
+        if (result.row.vectors) row_scheduler_->Submit(std::move(result.row), clk_);
         turn_off=instruction_sequencer_->Complete();
     } else {
         ProcessPimTransaction();
@@ -394,6 +399,13 @@ void JedecDRAMSystem::PrintStats() {
     stats["status"]=sequence.end_completed ? "complete" : "incomplete";
     stats["executor_stage"]=execution_.iw_status;
     stats["simulated_cycles"]=clk_;
+    stats["row_lockstep"] = bool(row_scheduler_);
+    if (row_scheduler_) {
+        const auto& rows = row_scheduler_->Stats();
+        stats["row_operations_launched"] = rows.launched;
+        stats["row_operations_completed"] = rows.completed;
+        stats["row_boundary_wait_cycles"] = rows.boundary_wait_cycles;
+    }
     std::ofstream out(config_.output_dir+"hbnpu_instruction.json");
     out << stats.dump(2) << '\n';
     if (!sequence.end_completed) std::cout << "HB-NPU instruction program incomplete at cycle " << clk_ << '\n';

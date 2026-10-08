@@ -1,7 +1,7 @@
 #include <random>
 
 #include "catch.hpp"
-#include "pim_instruction_buffer.h"
+#include "hbnpu/pim_instruction_buffer.h"
 using namespace dramsim3;
 
 TEST_CASE("One reserved slot assembles all eight CONFIG words",

@@ -180,6 +180,15 @@ Existing fused `TILE_BLOCK` packets remain supported; use `--fused` with the
 translator to generate them. Separate vector-processing instructions are not
 supported, and no extra resident buffer or cross-tile reuse is modeled.
 
+Instruction mode decomposes GEMM tiles into row-bounded operations inside
+HB-NPU. Bank preparation and refresh may delay a row's start; after a common
+start across channels, the read stream follows a fixed GH/LH schedule. A missed
+beat is an error, not an implicit stall. `hbnpu_rows.jsonl` records completed
+row intervals for checking against command traces. Set `row_lockstep = false`
+in `[hbnpu]` to use the earlier per-vector execution path for comparison.
+This models command-issue predictability within one HB-NPU, not physical PVT
+variation or inter-device communication.
+
 Check `hbnpu_instruction.json` in the output directory for `end_completed`,
 buffer occupancy, CPU backpressure, and starvation counters. A cycle-capped or
 truncated program is reported as incomplete, not successful. Instruction-mode
@@ -321,18 +330,21 @@ num_gh_read_cmds              =        1500
 ```
 ## Code structure
 
+HB-NPU-specific sources and headers live in `src/hbnpu/`. Shared DRAM and
+host simulation files remain directly under `src/`.
+
 | Path | Responsibility |
 |---|---|
 | `gen_workload_prompt.py`, `gen_workload_decode.py` | Generate prefill/decode kernel workloads |
 | `gen_LLM_trace.py` | Encode workload parameters and base rows into PIM transactions |
 | `src/cpu.cc` | Submit transactions with queue backpressure |
-| `src/pim_transaction.{h,cc}` | Decode PIM transactions |
-| `src/pim_config.h`, `src/pim_execution_state.h` | Decoded configuration, launch staging, and legacy progress diagnostics |
-| `src/pim_kernel_context.h` | Launch-time kernel context and block descriptors |
-| `src/legacy_tile_scheduler.{h,cc}` | Select compute and output blocks in legacy traversal order |
-| `src/pim_tile_executor.{h,cc}` | Execute supplied blocks, track issued vectors, and preserve stage timing |
+| `src/hbnpu/pim_transaction.{h,cc}` | Decode PIM transactions |
+| `src/hbnpu/pim_config.h`, `src/hbnpu/pim_execution_state.h` | Decoded configuration, launch staging, and legacy progress diagnostics |
+| `src/hbnpu/pim_kernel_context.h` | Launch-time kernel context and block descriptors |
+| `src/hbnpu/legacy_tile_scheduler.{h,cc}` | Select compute and output blocks in legacy traversal order |
+| `src/hbnpu/pim_tile_executor.{h,cc}` | Execute supplied blocks, track issued vectors, and preserve stage timing |
 | `src/dram_system.cc` | Coordinate ingress, block selection, refresh, and channel dispatch |
-| `src/pim_operation.h`, `src/pim_command_batch.h` | Represent logical PIM operations and batches |
+| `src/hbnpu/pim_operation.h`, `src/hbnpu/pim_command_batch.h` | Represent logical PIM operations and batches |
 | `src/controller.cc` | Arbitrate per-channel commands and issue eligible bank operations |
 | `src/channel_state.cc`, `src/bankstate.cc`, `src/timing.cc` | Track bank state and enforce timing constraints |
 | `src/refresh.cc` | Manage refresh scheduling |

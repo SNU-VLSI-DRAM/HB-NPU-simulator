@@ -83,10 +83,13 @@ duplicate load, mismatched tile, or END in place of GEMM is rejected before
 resource waits can hide the error. A truncated upload remains incomplete.
 
 There is one active resident tile, with no extra buffering, prefetch or reuse
-across tiles. Existing output overlap and stage-shift timing remain in effect.
+across tiles. Stage-shift timing remains in effect. Row mode reserves the
+channel during input streaming, so competing output traffic waits outside
+that interval; total kernel latency can change.
 For compatibility, a fused TILE_BLOCK can replace any complete LOAD_INPUTS /
-TILE_GEMM pair; it cannot appear between the two. Its wire encoding and behavior
-are unchanged. Older instruction-mode binaries reject the new opcodes; use
+TILE_GEMM pair; it cannot appear between the two. Its wire encoding and fused
+semantics are unchanged; row mode applies to its streaming stage too.
+Older instruction-mode binaries reject the new opcodes; use
 `--fused` when generating traces for those binaries.
 
 STORE dispatch reserves the output descriptor; actual writes wait for final-K
@@ -114,11 +117,59 @@ is eligible for dispatch at t+1. At most one packet dispatches per tick, in orde
 Dispatch frees the packet slot while the executor retains a bounded active
 descriptor; it does not imply that computation or output has completed.
 
-Tick order is refresh/completion checks, ingress, dispatch, executor progress,
-then controllers. CPU submission follows the memory tick. Refresh can pause
-bank work while upload and free descriptor slots continue to accept work.
+Tick order is completion checks and row coordination, refresh checks, ingress,
+dispatch, executor progress, then controllers. CPU submission follows the
+memory tick. Refresh can pause bank preparation while upload and free
+descriptor slots continue to accept work.
 END alone signals successful completion, after the backend drains. Missing END
 or a partial packet at the cycle limit produces an incomplete result.
+
+## Row boundary synchronization
+
+`row_lockstep` defaults to true in tile-instruction mode and false in legacy
+mode. The CPU packet format is unchanged: the HB-NPU executor decomposes each
+tile's streamed operand into internal descriptors that stop at a physical
+row boundary or the end of the tile. Resident loading remains separate.
+One row descriptor's command metadata is buffered; no operand buffer is added.
+Set `[hbnpu] row_lockstep = false` for the preceding per-vector scheduling path.
+Row mode requires tile instructions and self-refresh disabled.
+
+Before START, controllers drain existing PIM work, perform legal PRE/ACT
+operations (including gang preparation for LH), and wait until every target
+can read. The coordinator checks every channel and the next refresh deadline.
+The reserved budget includes the final read offset, a conservative
+`max(tRAS, AL+tRTP) + tRP + banks + 1` recovery/precharge margin. Refresh is not
+postponed or disabled. Submission also requires a feasible post-refresh window:
+the row budget plus conservative refresh recovery, residual tFAW, activation
+waves, tRCDRD and one coordination cycle must fit the configured interval.
+An interval failing this check is rejected rather than waiting forever. The
+bound can reject aggressive configurations that permit only a favorable
+initial launch. Otherwise, insufficient remaining time delays launch.
+
+Once all channels are ready, START is common to all of them. Each controller
+reserves its command path through the final beat, including any cadence gaps.
+For the supported two-bank GH layout, banks 1 and 9 alternate at tCCD_S spacing;
+each next vector begins after `max(burst_cycle, tCCD_L, 2*tCCD_S)` cycles.
+LH broadcasts a vector to all banks every `max(burst_cycle, tCCD_L)` cycles.
+With the supplied HBM configuration this gives successive GH beats one cycle
+apart and LH broadcasts two cycles apart. Every actual issue is rechecked:
+unexpected refresh, a missed beat, or channel skew raises a predictability
+violation instead of rescheduling the stream. Tile accumulation and final-K
+output readiness remain owned by the enclosing tile executor.
+
+The contract is fixed controller-read issue timing relative to START, not
+fixed latency from CPU submission or a model of physical PVT variation.
+`hbnpu_rows.jsonl` records each completed row's request, START, last issue,
+address range and cadence. `hbnpu_instruction.json` includes launched/completed
+row counts and boundary-wait cycles. An unfinished final row in a capped run
+is not reported as a completed predictable interval. The comparison tool
+independently checks the row records against physical command and logical
+issue traces, including exact beat cycles and all-channel alignment.
+
+The `[pim-row-boundary]` C++ tests check admission at one cycle below, exactly
+at, and one cycle above the refresh budget, with banks already ready. They
+also check progress resets and command addresses across consecutive full rows
+and a one-vector tail, for both GH and LH streaming.
 
 ## Translator and diagnostics
 

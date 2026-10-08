@@ -1,10 +1,10 @@
 #include "catch.hpp"
 #include "controller.h"
 #include "dram_system.h"
-#include "pim_command_batch.h"
-#include "pim_config.h"
-#include "pim_execution_state.h"
-#include "pim_transaction.h"
+#include "hbnpu/pim_command_batch.h"
+#include "hbnpu/pim_config.h"
+#include "hbnpu/pim_execution_state.h"
+#include "hbnpu/pim_transaction.h"
 #include "timing.h"
 
 namespace {

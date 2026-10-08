@@ -1,7 +1,7 @@
 #ifndef DRAMSIM3_LEGACY_TILE_SCHEDULER_H
 #define DRAMSIM3_LEGACY_TILE_SCHEDULER_H
 
-#include "pim_kernel_context.h"
+#include "hbnpu/pim_kernel_context.h"
 
 namespace dramsim3 {
 

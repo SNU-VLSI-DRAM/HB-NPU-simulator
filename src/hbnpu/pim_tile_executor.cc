@@ -1,4 +1,4 @@
-#include "pim_tile_executor.h"
+#include "hbnpu/pim_tile_executor.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -167,8 +167,11 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
             break;
         case 2: {
             state.vpu_cnt = std::max(0,state.vpu_cnt-1);
-            if (state.input_pending && !feedback.input_pending) {
-                state.input_pending = false;
+            if (state.input_pending && (config_.row_lockstep
+                    ? feedback.row_vectors_completed > row_observed_
+                    : !feedback.input_pending)) {
+                if (config_.row_lockstep) ++row_observed_;
+                state.input_pending = config_.row_lockstep && row_observed_ < row_vectors_;
                 result.events.push_back(PimProgress::InputVectorIssued);
                 // Retain the approved array geometry and activation overlap.
                 // Trigger these counters on completed data vectors, never PRE.
@@ -187,6 +190,14 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
                 }
             }
             if (state.iw_status != 2 || state.input_pending || wait_refresh || state.vpu_cnt) break;
+            if (config_.row_lockstep) {
+                result.row = PimRowOperation::Build(config_, context_, state.m_it,
+                    state.k_tile_it, compute_.m_origin + compute_.m_extent);
+                row_vectors_ = result.row.vectors;
+                row_observed_ = 0;
+                state.input_pending = true;
+                break;
+            }
             int M_tile_it = state.m_it/pim_config_.m_tile_size;
             int M_current_tile_size = state.m < pim_config_.m_tile_size*(M_tile_it+1) ?
                                       state.m%pim_config_.m_tile_size : pim_config_.m_tile_size;

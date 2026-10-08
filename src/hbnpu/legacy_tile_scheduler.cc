@@ -1,4 +1,4 @@
-#include "legacy_tile_scheduler.h"
+#include "hbnpu/legacy_tile_scheduler.h"
 
 #include <algorithm>
 

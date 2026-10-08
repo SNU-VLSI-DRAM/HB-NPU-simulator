@@ -2,7 +2,7 @@
 #define DRAMSIM3_PIM_INSTRUCTION_BUFFER_H
 #include <deque>
 
-#include "pim_instruction.h"
+#include "hbnpu/pim_instruction.h"
 namespace dramsim3 {
 struct PimIngressStats {
     uint64_t admitted_words = 0, decoded_instructions = 0,

@@ -3,7 +3,11 @@ import configparser
 from pathlib import Path
 import tempfile
 import unittest
-from compare_instruction_execution import compare_data_streams, validate_timing
+from compare_instruction_execution import (
+    compare_data_streams,
+    validate_timing,
+    validate_rows,
+)
 
 CONFIG = Path(__file__).resolve().parents[2] / "configs/HBM2_8Gb_x128_pim.ini"
 
@@ -26,6 +30,53 @@ def issue(cycle, kind, targets):
 
 
 class ComparisonTest(unittest.TestCase):
+    def test_row_predictability_checks_physical_issues_not_just_duration(self):
+        commands, issues = {}, {}
+        for ch in range(8):
+            commands[str(ch)], issues[str(ch)] = [], []
+            for beat in range(4):
+                c = command(100 + beat, "gh_read", bank=1, row=9, column=30 + beat // 2)
+                c["channel"] = ch
+                c["bankgroup"] = (beat % 2) * 2
+                commands[str(ch)].append(c)
+                i = issue(100 + beat, "GH_READ", [[(beat % 2) * 2, 1]])
+                i["channel"] = ch
+                issues[str(ch)].append(i)
+        rows = [
+            dict(
+                id=0,
+                request_cycle=0,
+                start_cycle=100,
+                last_issue_cycle=103,
+                vectors=2,
+                operations_per_vector=2,
+                vector_period=2,
+                row=9,
+                first_column=30,
+            )
+        ]
+        self.assertEqual(validate_rows(commands, issues, rows, CONFIG), [])
+        for field, value in (
+            ("cycle", 104),
+            ("row", 10),
+            ("column", 29),
+            ("kind", "precharge"),
+        ):
+            changed = copy.deepcopy(commands)
+            changed["3"][1][field] = value
+            self.assertTrue(validate_rows(changed, issues, rows, CONFIG))
+        shifted = copy.deepcopy(issues)
+        shifted["3"][1]["cycle"] += 1
+        self.assertTrue(validate_rows(commands, shifted, rows, CONFIG))
+        for field, value in (
+            ("vectors", 3),
+            ("vector_period", 3),
+            ("last_issue_cycle", 104),
+        ):
+            changed = copy.deepcopy(rows)
+            changed[0][field] = value
+            self.assertTrue(validate_rows(commands, issues, changed, CONFIG))
+
     def test_bank_refresh_cross_bank_constraints(self):
         for bg, bank in ((0, 1), (1, 0)):
             for first, second, earliest in (

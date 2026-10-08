@@ -1,4 +1,4 @@
-#include "pim_instruction_buffer.h"
+#include "hbnpu/pim_instruction_buffer.h"
 
 #include <algorithm>
 #include <stdexcept>

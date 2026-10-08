@@ -29,6 +29,9 @@ Config::Config(std::string config_file, std::string out_dir)
     if (execution_mode!="legacy" && execution_mode!="tile_instructions")
         throw std::invalid_argument("hbnpu.execution_mode must be legacy or tile_instructions");
     tile_instructions=execution_mode=="tile_instructions";
+    row_lockstep=reader_->GetBoolean("hbnpu","row_lockstep",tile_instructions);
+    if (row_lockstep && (!tile_instructions || enable_self_refresh))
+        throw std::invalid_argument("HB-NPU row lockstep requires tile instructions and self-refresh disabled");
     const std::string capacity=reader_->Get("hbnpu","instruction_capacity","16");
     size_t consumed=0;
     long long slots=std::stoll(capacity,&consumed);

@@ -2,13 +2,15 @@
 #define DRAMSIM3_PIM_TILE_EXECUTOR_H
 #include <functional>
 #include "configuration.h"
-#include "pim_kernel_context.h"
-#include "pim_command_batch.h"
+#include "hbnpu/pim_kernel_context.h"
+#include "hbnpu/pim_command_batch.h"
+#include "hbnpu/pim_row_operation.h"
 
 namespace dramsim3 {
 struct PimTickFeedback {
     bool wait_refresh = false, in_refresh = false;
     bool weight_pending = false, input_pending = false, output_pending = false;
+    int row_vectors_completed = 0;
 };
 enum class PimProgress {
     ResidentVectorIssued, ResidentTileReady, InputVectorIssued, BlockStreamingExhausted,
@@ -16,6 +18,7 @@ enum class PimProgress {
 };
 struct PimTickResult {
     PimCommandBatch batch;
+    PimRowOperation row;
     std::vector<PimProgress> events;
     bool finished = false;
     bool computation_finished = false;
@@ -47,6 +50,7 @@ class PimTileExecutor {
     PimOutputBlock output_;
     bool compute_active_ = false, output_active_ = false;
     bool compute_requested_ = false;
+    int row_vectors_ = 0, row_observed_ = 0;
     bool compute_exhausted_ = false, output_exhausted_ = false;
 };
 }  // namespace dramsim3

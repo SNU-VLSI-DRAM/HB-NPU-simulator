@@ -2,8 +2,8 @@
 #define DRAMSIM3_PIM_KERNEL_CONTEXT_H
 
 #include <stdexcept>
-#include "pim_config.h"
-#include "pim_execution_state.h"
+#include "hbnpu/pim_config.h"
+#include "hbnpu/pim_execution_state.h"
 
 namespace dramsim3 {
 

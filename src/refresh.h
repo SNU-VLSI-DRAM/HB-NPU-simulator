@@ -14,6 +14,11 @@ class Refresh {
     void ClockTick();
     bool pim_refresh_coming();
     bool pim_refresh_coming2();
+    uint64_t Interval() const { return refresh_interval_; }
+    uint64_t CyclesToDeadline() const {
+        return clk_ && clk_ % refresh_interval_ == 0 ? 0 :
+            refresh_interval_ - clk_ % refresh_interval_;
+    }
 
    private:
     uint64_t clk_;

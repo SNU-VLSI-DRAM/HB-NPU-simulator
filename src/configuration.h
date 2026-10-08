@@ -37,6 +37,7 @@ class Config {
     Address AddressMapping(uint64_t hex_addr) const;
     uint64_t AddressUnmapping(Address addr) const;
     bool tile_instructions = false;
+    bool row_lockstep = false;
     size_t instruction_capacity = 16;
     // DRAM physical structure
     DRAMProtocol protocol;

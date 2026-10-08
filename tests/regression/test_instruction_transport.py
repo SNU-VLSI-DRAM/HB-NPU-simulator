@@ -15,6 +15,13 @@ from hbnpu_instruction import KernelConfig, compile_kernel, encode_packet, write
 class TransportTest(unittest.TestCase):
     binary = None
 
+    def test_tile_submission_really_executes_row_operations(self):
+        result, stats, _, _ = self.run_program()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(stats["end_completed"])
+        self.assertEqual(stats.get("row_operations_completed"), 4)
+        self.assertEqual(stats.get("row_operations_launched"), 4)
+
     def run_program(
         self,
         *,

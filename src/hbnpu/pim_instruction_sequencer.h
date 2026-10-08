@@ -2,8 +2,8 @@
 #define DRAMSIM3_PIM_INSTRUCTION_SEQUENCER_H
 #include <memory>
 
-#include "pim_instruction_buffer.h"
-#include "pim_tile_executor.h"
+#include "hbnpu/pim_instruction_buffer.h"
+#include "hbnpu/pim_tile_executor.h"
 namespace dramsim3 {
 struct PimSequencerStats {
     uint64_t dispatched_instructions = 0, retired_instructions = 0,

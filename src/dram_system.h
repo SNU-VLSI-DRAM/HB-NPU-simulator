@@ -9,12 +9,13 @@
 #include "common.h"
 #include "configuration.h"
 #include "controller.h"
-#include "pim_command_batch.h"
-#include "pim_config.h"
-#include "pim_execution_state.h"
-#include "pim_tile_executor.h"
-#include "legacy_tile_scheduler.h"
-#include "pim_instruction_sequencer.h"
+#include "hbnpu/pim_command_batch.h"
+#include "hbnpu/pim_config.h"
+#include "hbnpu/pim_execution_state.h"
+#include "hbnpu/pim_tile_executor.h"
+#include "hbnpu/legacy_tile_scheduler.h"
+#include "hbnpu/pim_instruction_sequencer.h"
+#include "hbnpu/pim_row_scheduler.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -101,6 +102,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     std::unique_ptr<LegacyTileScheduler> tile_scheduler_;
     std::unique_ptr<PimInstructionBuffer> instruction_buffer_;
     std::unique_ptr<PimInstructionSequencer> instruction_sequencer_;
+    std::unique_ptr<PimRowScheduler> row_scheduler_;
     uint64_t cpu_backpressure_cycles_ = 0;
 
    public:

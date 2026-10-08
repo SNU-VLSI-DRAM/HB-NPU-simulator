@@ -1,5 +1,5 @@
 #include "catch.hpp"
-#include "pim_operation.h"
+#include "hbnpu/pim_operation.h"
 #include "channel_state.h"
 
 using namespace dramsim3;

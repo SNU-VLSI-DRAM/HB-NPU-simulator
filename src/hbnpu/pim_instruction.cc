@@ -1,4 +1,4 @@
-#include "pim_instruction.h"
+#include "hbnpu/pim_instruction.h"
 
 #include <algorithm>
 #include <climits>
