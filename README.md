@@ -5,13 +5,8 @@ paper, using DRAMsim3 for DRAM timing and energy accounting. Python utilities
 generate OPT prefill and decode workloads and encode their kernel
 configurations into PIM transaction traces. The simulator schedules the
 corresponding Local HB (LH) and Global HB (GH) bank operations dynamically.
-An opt-in instruction mode accepts explicit tile packets generated offline,
-with CPU backpressure and a bounded instruction buffer. Dense Qwen2/Mistral
-configurations can generate grouped-query attention (GQA) and projection
+Dense Qwen2/Mistral configurations can generate grouped-query attention (GQA) and projection
 matrix workloads through this instruction path.
-
-This is a timing simulator, not a numerical inference runtime. Qwen/Mistral
-support covers independent matrix kernels, not complete model execution.
 
 If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870):
 ```
