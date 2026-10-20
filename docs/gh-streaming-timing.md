@@ -2,8 +2,11 @@
 
 ## Hardware interpretation
 
-For `configs/HBM2_8Gb_x128_pim.ini`, used by the regression tests,
-`tCK=1 ns`, `tCCD_S=1`, and `tCCD_L=2`.
+The canonical configuration is `configs/HBNPU_8Gb.ini`, with
+`tCK=1 ns`, `tCCD_S=1`, and `tCCD_L=2`. The historical regression fixture
+`configs/HBM2_8Gb_x128_pim.ini` shares those three timings but has different
+bus width, row geometry, CL, and other timing parameters. Results from the two
+profiles are not interchangeable.
 Timing parameters in the simulator are cycle counts, not absolute nanoseconds.
 
 | Streaming path | I/O resource | Array period | Array frequency |
@@ -24,6 +27,33 @@ LH reads can operate across independent banks in parallel. Independent channels
 also retain their own global-I/O slots. GH weight loading uses the same shared
 GH slot even in a kernel whose later streaming phase uses LH; that does not
 change the LH streaming array period.
+
+## GH operand arrival
+
+`[hbnpu] gh_read_delay` defaults to `true` in tile-instruction mode and `false`
+in legacy mode. An explicit setting overrides either default. With it enabled,
+GH_READ and GH_READ_PRECHARGE operands arrive at the actual data-command issue
+cycle plus `read_delay = AL + CL + burst_cycle`. This is a whole-burst-ready
+model for the global I/O path, not an additional interval between commands.
+For example, GH commands issued at cycles 100 and 101 with a 16-cycle read
+delay make their operands available at 116 and 117.
+
+The controller records arrival deadlines separately from command queues.
+Resident loads continue issuing at the existing cadence, then wait for the
+last return across all channels before becoming ready. This applies to
+resident loading in both dataflows because both use GH reads. For streaming,
+issued vectors remain pipelined while their arrivals are consumed in order;
+a two-bank GH vector is usable after both bank operands arrive. The existing
+array-stage counters start from operand arrival and retain their ACT-overlap
+subtractions. Row reservation and its trace still describe command issue,
+not the later operand-arrival window. In-flight arrivals and array counters
+continue during refresh in this mode; refresh still blocks new DRAM work.
+
+LH column data uses the direct per-bank hybrid-bonding path, modeled with no
+additional read-return latency. That is an abstraction, not zero physical
+propagation time. Existing next-tick issue feedback still applies. GH writes
+and normal CPU read/write timing are unchanged. This option does not add a
+separate numerical GEMM, VPU, or physical store-completion model.
 
 ## Channel operations and gang timing
 
@@ -75,20 +105,36 @@ Existing per-bank read/write recovery rules remain. This correction does not
 introduce a new cross-bank read/write bus-turnaround model. The scheduler no
 longer depends on the earlier read-only readiness-lookahead mechanism.
 
-The stage-counter equations retain their existing geometry terms but now select
-the array period by **streaming dataflow**:
+For the fixed 128x128 array profile, each bank group has 16x8 PEs; eight
+groups vertically and sixteen horizontally cover the array. The modeled
+result pipeline uses one MAC cycle, four local reduction cycles (16 inputs),
+and three cross-bank reduction cycles (eight inputs): **eight array cycles**.
+Both reductions are trees; the vertical reduction is not eight serial
+bank-to-bank accumulation steps. Horizontal input distribution is assumed
+aligned and hidden by the result path, not added again to this latency.
+This is a declared pipeline assumption, not RTL-derived timing.
+
+The stage counters select the array period by **streaming dataflow**:
 
 ```text
 array_period = (df == 0) ? tCCD_S : tCCD_L
-out_cnt = max(1, array_period * (3 + 16) - tRCDWR)
+out_cnt = max(1, array_period * (1 + 4 + 3) - tRCDWR)
 in_cnt  = max(1, array_period * max(128 / mc, 16) - tRCDRD)
 mc = mcf * ucf
 ```
 
-These counters are now triggered when the corresponding data vector's issue
-has completed across channels. `out_cnt` is also decremented during its
-initialization tick, as before. The activation-overlap subtraction is retained;
-delays are not shortened to recover an old performance number.
+`out_cnt` starts on the first vector of the final-K block; `in_cnt` starts
+after its block's last vector. With GH read latency enabled, these refer to
+operand consumption after arrival; otherwise they retain next-tick issue
+feedback. `out_cnt` is also decremented during its initialization tick.
+The activation-overlap subtraction and minimum one-tick countdown are retained.
+With the supplied timing, eight array cycles mean 8 ns for GH and 16 ns for LH;
+the preparation countdowns are respectively 1 and 2 simulator cycles before
+the initialization-tick decrement. Expiration grants output eligibility, not
+an independently checked per-result data-ready event. Output submission still
+requires streaming to have finished. The separate `in_cnt` equation is unchanged.
+This result-pipeline correction applies in both execution modes, independently
+of the GH read-return-latency option.
 
 ## Trace formats
 
@@ -136,7 +182,8 @@ simulation. Gang preparation, single logical issue, and completion-based
 progress intentionally change activation and phase timing. Matching the old
 cycle trace is not a correctness requirement.
 
-The default `HBM2_8Gb_x128.ini` configuration was also checked with the prefill
+The then-default `HBM2_8Gb_x128.ini` configuration (now `HBNPU_8Gb.ini`)
+was also checked with the prefill
 and decode quick fixtures: 7,048 → 7,155 and 1,221 → 1,176 cycles respectively,
 with unchanged per-bank data streams and no GH collisions.
 

@@ -134,6 +134,24 @@ set_tests_properties(dramsim3_unit PROPERTIES
 )
 
 find_package(PythonInterp 3 REQUIRED)
+add_test(NAME hbnpu_canonical_hardware
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_canonical_hardware.py
+            $<TARGET_FILE:dramsim3main>)
+set_tests_properties(hbnpu_canonical_hardware PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+add_test(NAME hbnpu_gqa_workloads
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_gqa_workloads.py)
+add_test(NAME hbnpu_gqa_cli
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_gqa_cli.py)
+add_test(NAME hbnpu_gqa_execution
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_gqa_execution.py
+            $<TARGET_FILE:dramsim3main>)
+set_tests_properties(hbnpu_gqa_workloads hbnpu_gqa_cli hbnpu_gqa_execution PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
 add_test(NAME hbnpu_instruction_translation
     COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_instruction_translation.py)
 add_test(NAME hbnpu_instruction_comparison

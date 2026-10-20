@@ -356,12 +356,12 @@ TEST_CASE("PIM stage delays use the streaming dataflow clock", "[pim][gh-timing]
     JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
                            dummy_pim_callback);
     uint64_t dataflow = 0x2c0e;
-    int expected_out_count = 4;  // 1 * (3 + 16) - 14, then this tick's decrement
+    int expected_out_count = 0;  // max(1, 1 * (1 + 4 + 3) - 14), then decrement
     int expected_in_count = 50;  // 1 * max(128 / 2, 16) - 14
     SECTION("GH streams at one-cycle array period") {}
     SECTION("LH streams at two-cycle array period") {
         dataflow = 0x2ece;
-        expected_out_count = 23; // 2 * (3 + 16) - 14, then decrement
+        expected_out_count = 1; // 2 * (1 + 4 + 3) - 14, then decrement
         expected_in_count = 18;  // 2 * max(128 / 16, 16) - 14
     }
     for (uint64_t address : {dataflow, uint64_t(0x200), uint64_t(0x402),

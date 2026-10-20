@@ -207,6 +207,14 @@ void Controller::IssuePim(const PimOperation& ready) {
         next_global_io_cycle_ = clk_ + std::max(1, config_.tCCD_S);
 }
 
+void Controller::RecordReadArrival(const PimOperation& issued, PimSource source) {
+    if (issued.opcode != PimOpcode::GH_READ &&
+        issued.opcode != PimOpcode::GH_READ_PRECHARGE) return;
+    auto& ready = source == PimSource::WEIGHT ? weight_ready_cycle_ : input_ready_cycle_;
+    // This records the actual data command, never its ACT/PRE prerequisite.
+    ready = clk_ + (config_.gh_read_delay ? config_.read_delay : 0);
+}
+
 bool Controller::PrepareRowBanks() {
     // Boundary work may wait, but must never consume a data beat before START.
     for (int i = 0; i < row_width_; ++i) {
@@ -238,6 +246,7 @@ bool Controller::IssueRowBeat() {
         throw std::runtime_error(
             "PIM row predictability violation: missed scheduled beat");
     IssuePim(ready);
+    RecordReadArrival(ready, PimSource::INPUT);
     ++row_next_;
     return true;
 }
@@ -257,7 +266,7 @@ bool Controller::HasPendingPimInRank(int rank) const {
     return false;
 }
 
-bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, bool input) {
+bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, PimSource source) {
     // An unready target may not hold another bank's eligible transfer hostage.
     // Preserve per-bank order while permitting A,B,A,B interleaving.
     std::set<std::tuple<int,int,int>> blocked_banks;
@@ -276,8 +285,9 @@ bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, bool input) 
         // without mutation. Issue the validated broadcast's physical effects.
         IssuePim(ready);
         if (ready.opcode == pending.opcode) {
+            RecordReadArrival(ready, source);
             queue.erase(queue.begin()+i);
-            if (input) release_time.erase(release_time.begin()+i);
+            if (source == PimSource::INPUT) release_time.erase(release_time.begin()+i);
         }
         return true;
     }
@@ -328,9 +338,9 @@ void Controller::ClockTick() {
         } else {
             // TODO if second == 0, issue and set cmd_issue true. else,
             // decrement by 1.
-            cmd_issued = SchedulePimQueue(rd_w_cmds_, false) ||
-                         SchedulePimQueue(rd_in_cmds_, true) ||
-                         SchedulePimQueue(wr_cmds_, false);
+            cmd_issued = SchedulePimQueue(rd_w_cmds_, PimSource::WEIGHT) ||
+                         SchedulePimQueue(rd_in_cmds_, PimSource::INPUT) ||
+                         SchedulePimQueue(wr_cmds_, PimSource::OUTPUT);
             // rd_in_cmds_.clear(); //used in MT
         }
     }

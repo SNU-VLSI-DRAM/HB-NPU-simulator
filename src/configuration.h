@@ -38,6 +38,7 @@ class Config {
     uint64_t AddressUnmapping(Address addr) const;
     bool tile_instructions = false;
     bool row_lockstep = false;
+    bool gh_read_delay = false;
     size_t instruction_capacity = 16;
     // DRAM physical structure
     DRAMProtocol protocol;

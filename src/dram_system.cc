@@ -202,6 +202,8 @@ void JedecDRAMSystem::ClockTick() {
         feedback.weight_pending=PendingPimSource(PimSource::WEIGHT);
         feedback.input_pending=PendingPimSource(PimSource::INPUT);
         feedback.output_pending=PendingPimSource(PimSource::OUTPUT);
+        feedback.weight_ready_cycle=PimReadReadyCycle(PimSource::WEIGHT);
+        feedback.input_ready_cycle=PimReadReadyCycle(PimSource::INPUT);
         if (row_scheduler_) feedback.row_vectors_completed=row_scheduler_->CompletedVectors();
         auto result=instruction_sequencer_->Tick(clk_,*instruction_buffer_,feedback);
         execution_=instruction_sequencer_->Snapshot();
@@ -338,14 +340,24 @@ bool JedecDRAMSystem::PendingPimSource(PimSource source) const {
     return false;
 }
 
+uint64_t JedecDRAMSystem::PimReadReadyCycle(PimSource source) const {
+    uint64_t ready = 0;
+    for (const auto* controller : ctrls_)
+        ready = std::max(ready, controller->PimReadReadyCycle(source));
+    return ready;
+}
+
 void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
-    if (!pim_config_.configured || !execution_.in_pim || is_in_ref) return;
+    if (!pim_config_.configured || !execution_.in_pim ||
+        (is_in_ref && !config_.gh_read_delay)) return;
     PimTickFeedback feedback;
     feedback.wait_refresh = wait_refresh;
     feedback.in_refresh = is_in_ref;
     feedback.weight_pending = PendingPimSource(PimSource::WEIGHT);
     feedback.input_pending = PendingPimSource(PimSource::INPUT);
     feedback.output_pending = PendingPimSource(PimSource::OUTPUT);
+    feedback.weight_ready_cycle = PimReadReadyCycle(PimSource::WEIGHT);
+    feedback.input_ready_cycle = PimReadReadyCycle(PimSource::INPUT);
     PimDescriptorSource source;
     source.next_compute = [this](PimComputeBlock& block) {
         return tile_scheduler_->NextCompute(block);

@@ -32,8 +32,11 @@ CONFIG has seven payload words (eight transactions total):
 6. df in bits 7:0, mcf in 15:8, ucf in 23:16; remaining bits zero.
 7. Channels in bits 31:0, banks/channel in 47:32, columns/burst in 63:48.
 
-The topology is the simulator's normalized geometry. For the supplied HBM
-configuration, columns are doubled for prefetch, giving 32 columns/burst.
+The topology is the simulator's normalized geometry. HBM column normalization
+doubles the INI column count before division by BL: the canonical
+`HBNPU_8Gb.ini` gives 64 addressable bursts per row, while the historical
+`HBM2_8Gb_x128_pim.ini` fixture gives 32. The field named `columns/burst`
+carries this addressable-burst count; it is not the number of bytes per command.
 Kernel coordinates use the same transformed M/N/K layout as legacy traces.
 CONFIG is immutable and may occur only once.
 
@@ -76,8 +79,11 @@ and GEMM sequence 3 for origins (0,0,0) are:
 ```
 
 GEMM dispatch may occur before the resident load finishes; execution waits for
-all addressed channels to issue their resident data commands. Load retirement
-occurs at resident-tile readiness. Without a matching GEMM, the resident tile
+all addressed channels to complete resident loading. With `gh_read_delay`
+enabled (the instruction-mode default), this includes operand arrival after
+the final GH read, not just command issue. See the
+[GH arrival model](gh-streaming-timing.md#gh-operand-arrival).
+Load retirement occurs at resident-tile readiness. Without a matching GEMM, the resident tile
 remains ready but no streamed reads or computation start. A missing load,
 duplicate load, mismatched tile, or END in place of GEMM is rejected before
 resource waits can hide the error. A truncated upload remains incomplete.
@@ -103,6 +109,13 @@ counts. Tile/interleaving factors must be powers of two. Unsupported layouts,
 topology mismatches, bad sequence/order, reserved bits, and unsafe integer or
 row-address extents are rejected. This is a timing/command simulator, not a
 numerical matrix evaluator.
+
+`gen_gqa_workload.py` emits this same version-1 instruction encoding. Its
+version-2 JSON manifest is a separate metadata format, not a new ISA version.
+For multi-group programs, the manifest's `members` describes each real
+batch/KV group and its bank/column mapping. The existing LH store protocol is
+fixed-footprint; it does not establish byte-accurate materialization of every
+logical output. See the [GQA scope and limitations](../README.md#dense-qwen2mistral-matrix-workloads).
 
 ## Queue and cycle behavior
 

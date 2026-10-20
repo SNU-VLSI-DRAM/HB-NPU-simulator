@@ -96,6 +96,7 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
     void DispatchCommands(const PimCommandBatch& batch);
     bool PendingPimSource(PimSource source) const;
+    uint64_t PimReadReadyCycle(PimSource source) const;
     void TickControllers();
     PimDataflowConfig pim_config_;
     std::unique_ptr<PimTileExecutor> tile_executor_;

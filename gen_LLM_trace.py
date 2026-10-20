@@ -12,7 +12,7 @@ parser.add_argument("-m", default="OPT-2.7B", help="Model mode: model configurat
 parser.add_argument("-i", default=1024, help="Model mode: input tokens")
 parser.add_argument("-o", default=128, help="Model mode: output tokens")
 parser.add_argument("-b", default=64, help="Model mode: batch size")
-parser.add_argument("-s", default="configs/HBM2_8Gb_x128.ini", help="DRAM specification file to read")
+parser.add_argument("-s", default="configs/HBNPU_8Gb.ini", help="DRAM specification file to read")
 
 
 def extract_variables(file_path):

@@ -1,14 +1,19 @@
-
 # HB-NPU Simulator
+
 HB-NPU Simulator models the HB-DRAM near-memory accelerator described in our
 paper, using DRAMsim3 for DRAM timing and energy accounting. Python utilities
 generate OPT prefill and decode workloads and encode their kernel
 configurations into PIM transaction traces. The simulator schedules the
 corresponding Local HB (LH) and Global HB (GH) bank operations dynamically.
-An opt-in instruction mode instead accepts explicit tile packets generated
-offline, with CPU backpressure and a bounded instruction buffer.
+An opt-in instruction mode accepts explicit tile packets generated offline,
+with CPU backpressure and a bounded instruction buffer. Dense Qwen2/Mistral
+configurations can generate grouped-query attention (GQA) and projection
+matrix workloads through this instruction path.
 
-If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870),:
+This is a timing simulator, not a numerical inference runtime. Qwen/Mistral
+support covers independent matrix kernels, not complete model execution.
+
+If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.ieee.org/document/11132870):
 ```
 @INPROCEEDINGS{11132870,
   author={Han, Sanghyeok and Yoon, Byungkuk and Park, Gyeonghwan and Song, Choungki and Kim, Dongkyun and Kim, Jae-Joon},
@@ -23,67 +28,35 @@ If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.
 
 ```
 
-## Refactoring and timing updates
+## Supported workloads
 
-The latest updates separate kernel configuration, execution state, and logical
-channel operations; remove obsolete spatial-cut fields from both code and input
-formats; and correct GH read/write interleaving and gang activation timing.
-The initial refactor preserved behavior, while the subsequent format migration
-and timing fixes are intentional compatibility changes.
+| Workload | Entry point | Scope |
+|---|---|---|
+| OPT prefill/decode | `run_demo.py`, existing workload generators | Paper-oriented kernel timing workflows |
+| Dense Qwen2 / Mistral GQA | `gen_gqa_workload.py` | Grouped QK/SV and Q/K/V/O, gate/up/down matrix kernels |
+| Explicit tile instructions | `gen_tile_trace.py` | Compile existing workload descriptions into instruction traces |
 
-See the [complete update and migration overview](docs/refactoring/2026-09-hbnpu-updates.md)
-for the architecture/file map, validation results, performance comparisons, and
-remaining limitations. Old external traces must be regenerated before use.
-
-Implemented changes include:
-
-- Separate PIM transaction decoding, configuration, execution state, and command
-  batching components.
-- One logical PIM issue per channel per cycle, with all-bank LH broadcasts and
-  four-bank `GANG_ACT` / `GANG_PRE` operations.
-- Shared GH read/write transfer slots and corrected GH stage delays.
-- Scheduling progress based on actual data-command issue, with pending work
-  retained through bank preparation and refresh.
-- Physical and logical command traces, unit tests, and exact regression checks.
-
-## HB-NPU streaming clocks
-
-With the supplied `tCK=1 ns`, `tCCD_S=1`, and `tCCD_L=2` configuration:
-
-- **LH streaming:** bank-level I/O, array period **2 ns (500 MHz)**.
-- **GH streaming:** shared global I/O, array period **1 ns (1 GHz)**.
-  Prefill/weight-stationary workloads use `mcf=2, ucf=1` to alternate two banks:
-  `A@t, B@(t+1 ns), A@(t+2 ns), B@(t+3 ns)` for both GH reads and writes.
-
-The controller issues at most one logical PIM command per channel per cycle.
-GH reads and writes share the global-I/O slot, including auto-precharge variants.
-LH operations broadcast to all banks; `GANG_ACT`/`GANG_PRE` operate on four banks
-simultaneously. A gang activation consumes four slots in the rank's `tFAW`
-window. PIM activations intentionally ignore `tRRD`; normal DRAM timing is unchanged.
-Independent channels and the bank effects of one LH broadcast remain parallel.
-Current kernel output stores use GH writes: one selected bank for `df=1`, or
-two interleaved banks for `df=0, mc=2`.
-`in_cnt` and `out_cnt` use the streaming dataflow's array period: `tCCD_S` for
-GH, `tCCD_L` for LH. See [timing details and validation](docs/gh-streaming-timing.md).
+Start with [building](#building), then use the
+[Qwen/Mistral quick start](#dense-qwen2mistral-matrix-workloads) or
+[OPT evaluation](#run-the-opt-evaluation). The canonical hardware configuration
+is `configs/HBNPU_8Gb.ini`; do not substitute the historical `_pim.ini` fixture
+when interpreting canonical performance results.
 
 ## Building and running the simulator
 
-This simulator has been built based on DRAMsim3.
-Follow the below instructions of DRAMsim3 to build the environment.
-For details, goto link below:
-https://github.com/umd-memsys/DRAMsim3/tree/master
+The simulator is based on [DRAMsim3](https://github.com/umd-memsys/DRAMsim3).
+Use a C++11 compiler, CMake, and Python 3.7+. The GQA and tile-instruction
+generators use the Python standard library only. The legacy OPT evaluation
+and spreadsheet utilities also use:
 
-Also we recommend to install following python packages to use our custom python programs to generate and run LLM workloads and trace files.
-```
-pip install configparser
-pip install openpyxl
-pip install numpy
+```bash
+python3 -m pip install openpyxl numpy
 ```
 
 ### Building
 
-We require CMake 3.0+ to build this simulator.
-Doing out of source builds with CMake is recommended to avoid the build files cluttering the main directory.
+The commands below use CMake 3.13+ (`-S`/`-B` syntax). Build outside the source
+directory and enable command tracing for the regression tests.
 
 ```bash
 cmake -S . -B build -DCMD_TRACE=ON -DCMAKE_BUILD_TYPE=Debug
@@ -119,10 +92,14 @@ Ordinary test runs never update goldens. Golden changes must be explicit via
 The full suite includes C++ execution and packet tests, timing checks, workload
 parsing, five exact legacy quick fixtures, a 46-kernel OPT window, CPU instruction
 transport tests, and both exact and instruction-mode comparison tools.
-A broader comparison across four OPT model sizes preserved per-bank data
-streams in all 159 completed kernel pairs. The remaining OPT-66B kernel matched
-over a 100,000-cycle common prefix; full completion of that case remains
-unverified. See the [comparison report](docs/refactoring/2026-09-original-master-llm-comparison.md).
+A canonical-hardware audit against the original source covered 160 OPT kernel
+pairs: 149 completed with matching data streams; 11 matched only their common
+100,000-cycle prefixes. See the
+[canonical audit](docs/refactoring/2026-10-canonical-configuration-revalidation.md).
+The [September comparison](docs/refactoring/2026-09-original-master-llm-comparison.md)
+records an earlier implementation and must not be conflated with this audit.
+GQA tests cover packing/chunk identities, decode and prefill kernels, canonical
+all-bank row/address coverage, completion, and command timing.
 These checks validate simulator command behavior, not numerical model outputs.
 
 To compare two command-tracing builds on the same kernel, including a bounded
@@ -132,7 +109,7 @@ run of a large workload:
 python3 tests/regression/compare_binaries.py \
   --baseline /path/to/reference/build/dramsim3main \
   --candidate /path/to/candidate/build/dramsim3main \
-  --config configs/HBM2_8Gb_x128_pim.ini \
+  --config configs/HBNPU_8Gb.ini \
   --trace traces/OPT-66B_1024_128_128/prompt/L2 \
   --cycles 100000 --output /tmp/hbnpu-comparison-new
 ```
@@ -146,8 +123,16 @@ bounded run. It currently expects the eight-channel configuration used above.
 
 ### Execute tile instructions
 
-Legacy execution remains the default. To use explicit tile instructions, copy
-the supplied HBM INI file and add:
+Legacy execution remains the default. The canonical HB-NPU configuration is
+`configs/HBNPU_8Gb.ini` (renamed from `HBM2_8Gb_x128.ini`, with unchanged settings).
+It models 64-bit device/bus width, BL4, 32-byte requests, and 64 addressable
+bursts per row after HBM column normalization. `channel_size = 256` is MiB.
+The separate `HBM2_8Gb_x128_pim.ini` is a historical regression fixture with
+different geometry and timing; its golden results do not validate this profile.
+See the [canonical configuration audit](docs/refactoring/2026-10-canonical-configuration-revalidation.md)
+for the original-source comparison, full-row attention checks, and corrected
+roofline interpretation.
+To use explicit tile instructions, copy `configs/HBNPU_8Gb.ini` and add:
 
 ```ini
 [hbnpu]
@@ -161,7 +146,7 @@ Compile one existing workload, then run its instruction trace with that copy:
 mkdir -p output/tile-example
 python3 gen_tile_trace.py \
   -w workloads/OPT-2.7B/decode/createQKV \
-  -s configs/HBM2_8Gb_x128_pim.ini \
+  -s configs/HBNPU_8Gb.ini \
   -t output/tile-example/instructions.trace
 ./build/dramsim3main /path/to/instruction-mode.ini \
   -t output/tile-example/instructions.trace -c 100000 \
@@ -226,7 +211,7 @@ fields alone does not convert an existing trace. See the
 You can generate the LLM trace files by running ```gen_LLM_trace.py```. 
 ```bash
 # generate traces for OPT-2.7B with input tokens 1024, output tokens 128, and batch size 128
-python3 gen_LLM_trace.py -s configs/HBM2_8Gb_x128.ini -i 1024 -o 128 -b 128 -m OPT-2.7B
+python3 gen_LLM_trace.py -s configs/HBNPU_8Gb.ini -i 1024 -o 128 -b 128 -m OPT-2.7B
 ```
 
 Also you can generate the new LLM workloads by running ```gen_workload_prompt.py``` and ```gen_workload_decode.py```.
@@ -248,7 +233,7 @@ You can run HB-NPU with a sample trace of a matrix multiplication kernel using t
 Trace files are in ```traces/``` folder.
 ```bash
 mkdir -p output/example
-./build/dramsim3main configs/HBM2_8Gb_x128.ini \
+./build/dramsim3main configs/HBNPU_8Gb.ini \
   -c 100000 \
   -t traces/OPT-2.7B_128_1024_32/prompt/createQKV \
   -o output/example/
@@ -328,6 +313,95 @@ num_lh_read_cmds              =        10272
 num_gh_read_row_hits          =        1435   
 num_gh_read_cmds              =        1500   
 ```
+## Dense Qwen2/Mistral matrix workloads
+
+The generator supports the canonical 64-bit `HBNPU_8Gb.ini` and the historical
+128-bit `_pim.ini` fixture. Use the canonical configuration for HB-NPU analysis.
+
+`gen_gqa_workload.py` imports a local dense `qwen2` or `mistral` configuration
+and emits grouped QK/SV plus separate Q/K/V/O and gate/up/down projection
+programs. Existing OPT generators and instruction encodings are unchanged.
+
+```bash
+python3 gen_gqa_workload.py \
+  --model-config tests/fixtures/models/qwen2.5-7b.json \
+  --hardware configs/HBNPU_8Gb.ini \
+  --phase decode --sequence-length 143 --operations qk sv \
+  --output /tmp/qwen-gqa-143
+
+mkdir -p /tmp/qwen-gqa-run
+./build/dramsim3main /tmp/qwen-gqa-143/simulator.ini \
+  -t /tmp/qwen-gqa-143/000000_qk.trace -c 100000 -o /tmp/qwen-gqa-run
+```
+
+Run these commands from the repository root after building. Generation creates
+`simulator.ini`, `manifest.json`, and numbered instruction traces. The supplied
+example produces one packed QK program and one packed SV program. Run each
+trace separately in its own output directory and confirm `end_completed: true`
+in `hbnpu_instruction.json`; reaching `-c` is not evidence of completion.
+
+To use Mistral, replace `--model-config` with
+`tests/fixtures/models/mistral-7b-v0.3.json` and choose a fresh output directory.
+Use `--batch` for independent batch items, `--phase prefill` for per-token
+causal prefixes, or omit `--operations` to include projection kernels as well.
+The generated configuration enables instruction execution, row lockstep, and
+GH read-arrival timing. It disables self-refresh, not periodic DRAM refresh.
+
+The bundled JSONs are dimension-only fixtures verified against the publisher
+configs for [Qwen2.5-7B](https://huggingface.co/Qwen/Qwen2.5-7B/blob/main/config.json)
+and [Mistral-7B-v0.3](https://huggingface.co/mistralai/Mistral-7B-v0.3/blob/main/config.json),
+not complete inference configurations. No downloads occur during generation.
+
+- Queries sharing a KV head are resident: QK is `[g,d] @ [d,L]` and SV is
+  `[g,L] @ [L,d]`, with K/V LH-streamed. SV assumes normalized scores supplied
+  externally. There is no attention-specific opcode.
+- The profile is eight channels and sixteen banks/channel. Attention packs
+  independent KV groups/batch items first, in power-of-two packs of up to 16.
+  For `G` groups, `ucf=G`, `mcf=16/G`: each group shards its output columns over
+  `16/G` banks. Non-power-of-two remainders use smaller packs (six becomes 4+2).
+  Qwen2.5-7B batch 1 packs four groups; batch 4 packs sixteen. Mistral-7B batch 1
+  packs eight. Different layers, query positions, shapes, and causal prefixes
+  are never combined. Projections keep their independent single-record lowering.
+  Hardware geometry must have representable power-of-two rows/columns and a
+  nonzero rank capacity; unsupported profiles are rejected before file creation.
+  Logical K/output-column dimensions are padded to multiples of 128. Up to eight
+  active query/token rows per group share the existing output protocol; fewer
+  active rows do not reduce its write count. Larger groups split into chunks of
+  eight, each charging another complete stream. Inactive lanes are not extra
+  logical query outputs.
+- `manifest.json` format version 2 records valid/padded shapes per group, head IDs, logical row slices,
+  tensor/view identity, disjoint physical row regions and each instruction trace.
+  Chunks share the same K/V view region rather than copying the cache per head.
+  `members` is authoritative for packed programs: it records each batch/KV head,
+  tensor identity, resident-vector range, and bank/column stripe. Legacy singular
+  tensor/head fields are null for multi-group programs, not aliases of member 0.
+  Different padded prefix views may use different physical packings; this is not
+  a persistent online KV-cache implementation. Padding/layout conversion costs
+  are not simulated.
+- Output-store counts retain the existing fixed-footprint LH timing protocol.
+  They are not a byte-accurate materialization of every logical query output.
+  Roofline comparisons therefore distinguish ideal logical traffic from actual
+  issued stream traffic; they do not establish full inference accuracy.
+- Decode length includes the current token. Prefill (`--phase prefill`) emits
+  attention separately for each causal prefix, preserving token/head identity.
+- The CLI selects one layer (`--layer 0` by default) of TP rank 0 / PP stage 0.
+  `--tp` must divide Q/KV heads and intermediate size; `--pp` must divide layers.
+  O/down projection outputs are local contributions; collectives are excluded.
+  The Python generator can enumerate all local layers. This is not a full-model
+  memory-fit or end-to-end latency report.
+- Each trace is an independent CONFIG-to-END program: run it separately and
+  check `hbnpu_instruction.json` for `end_completed`. A cycle-capped incomplete
+  run is not a completed kernel. Output directories must not already exist.
+- Tensor values, softmax, RoPE, normalization, activation/gating, bias/residuals,
+  embeddings/lm_head and KV updates are not executed. MoE and enabled sliding
+  windows are rejected. Numerical inference correctness is not claimed.
+
+Run the grouped workload tests with
+`ctest --test-dir build -R hbnpu_gqa --output-on-failure` after rebuilding.
+For canonical command-trace checks, roofline bounds, and the measured
+head/batch-packing tradeoffs, see the
+[GQA trace/roofline report](docs/refactoring/2026-10-gqa-hybrid-roofline.md).
+
 ## Code structure
 
 HB-NPU-specific sources and headers live in `src/hbnpu/`. Shared DRAM and
@@ -337,6 +411,7 @@ host simulation files remain directly under `src/`.
 |---|---|
 | `gen_workload_prompt.py`, `gen_workload_decode.py` | Generate prefill/decode kernel workloads |
 | `gen_LLM_trace.py` | Encode workload parameters and base rows into PIM transactions |
+| `hbnpu_model.py`, `hbnpu_gqa.py`, `gen_gqa_workload.py` | Validate local dense model configs, lower grouped LH matrices, and emit instruction programs/manifests |
 | `src/cpu.cc` | Submit transactions with queue backpressure |
 | `src/hbnpu/pim_transaction.{h,cc}` | Decode PIM transactions |
 | `src/hbnpu/pim_config.h`, `src/hbnpu/pim_execution_state.h` | Decoded configuration, launch staging, and legacy progress diagnostics |
@@ -355,4 +430,13 @@ Block selection and execution are separate. The executor owns the active block
 and its vector/stage progress; it cannot select the next matrix block on its own.
 The legacy scheduler supplies blocks synchronously, without adding simulated
 handoff cycles. Command readiness and bank timing remain in the channel
-controllers. Workload formats, trace formats, and simulator invocation are unchanged.
+controllers. See the [legacy workload format](docs/pim-trace-format.md) and
+[instruction packet format](docs/pim-instruction-format.md) for the two input paths.
+
+## Documentation
+
+- [GH/LH timing assumptions and validation](docs/gh-streaming-timing.md)
+- [Instruction format, buffer behavior, and execution rules](docs/pim-instruction-format.md)
+- [Canonical hardware and original-source audit](docs/refactoring/2026-10-canonical-configuration-revalidation.md)
+- [GQA mapping, trace checks, and roofline analysis](docs/refactoring/2026-10-gqa-hybrid-roofline.md)
+- [Earlier refactoring and format migration](docs/refactoring/2026-09-hbnpu-updates.md)

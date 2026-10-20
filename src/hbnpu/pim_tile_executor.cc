@@ -45,6 +45,9 @@ void PimTileExecutor::LoadCompute(const PimComputeBlock& block) {
     state_.m_it = block.m_origin;
     state_.n_it = block.n_origin;
     state_.k_tile_it = block.k_origin / k_tile;
+    input_consumed_ = block.m_origin;
+    input_arrivals_.clear();
+    resident_arrival_pending_ = false;
 }
 
 void PimTileExecutor::LoadResident(const PimComputeBlock& block) {
@@ -95,16 +98,26 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
     result.compute_exhausted = compute_exhausted_;
     result.output_exhausted = output_exhausted_;
     PimExecutionState& state = state_;
-    const bool wait_refresh = feedback.wait_refresh;
-    if (!pim_config_.configured || !state.in_pim || feedback.in_refresh) return result;
+    const bool wait_refresh = feedback.wait_refresh || feedback.in_refresh;
+    if (!pim_config_.configured || !state.in_pim ||
+        (feedback.in_refresh && !config_.gh_read_delay)) return result;
     const int N_tile_size = 128;
     const int K_tile_size = std::min(config_.channels * 16, state.k);
     const int array_period = pim_config_.df == 0 ? config_.tCCD_S : config_.tCCD_L;
+    // Fixed 128x128 array profile: one MAC stage, four stages reducing
+    // 16 PEs locally, then three stages reducing eight banks in parallel.
+    const int result_pipeline_cycles = 1 + 4 + 3;
     const int weight_banks_reduce = pim_config_.df == 0 ? 8 : 16;
     const int N_tile_size_per_bank = std::min(state.n,
         (N_tile_size-1)/(config_.banks/weight_banks_reduce)+1);
     const bool output_ready = state.iw_status == 3;
     PimCommandBatch& batch = result.batch;
+    // In-flight GH data progresses in absolute time, including during refresh.
+    // Pending command queues deliberately track issue, not return latency.
+    if (resident_arrival_pending_ && clk_ >= feedback.weight_ready_cycle) {
+        resident_arrival_pending_ = false;
+        result.events.push_back(PimProgress::ResidentTileReady);
+    }
     auto add_vector = [&](PimSource source, const std::vector<Command>& commands) {
         if (commands.empty()) return;
         PimOperation operation(commands.front(),clk_);
@@ -134,7 +147,10 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
                     (N_tile_size == N_tile_size_per_bank || state.n_it % N_tile_size != 0)) {
                     state.n_it = N_tile_size*N_tile_it;
                     ++state.iw_status;
-                    result.events.push_back(PimProgress::ResidentTileReady);
+                    resident_arrival_pending_ = config_.gh_read_delay &&
+                        clk_ < feedback.weight_ready_cycle;
+                    if (!resident_arrival_pending_)
+                        result.events.push_back(PimProgress::ResidentTileReady);
                 }
             }
             if (state.iw_status != 0 || state.weight_pending || wait_refresh) break;
@@ -161,7 +177,7 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
             break;
         }
         case 1:
-            if (!compute_requested_) break;
+            if (!compute_requested_ || resident_arrival_pending_) break;
             ++state.iw_status;
             state.vpu_cnt = 1;
             break;
@@ -173,12 +189,18 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
                 if (config_.row_lockstep) ++row_observed_;
                 state.input_pending = config_.row_lockstep && row_observed_ < row_vectors_;
                 result.events.push_back(PimProgress::InputVectorIssued);
-                // Retain the approved array geometry and activation overlap.
-                // Trigger these counters on completed data vectors, never PRE.
-                if (compute_.final_k && state.m_it == compute_.m_origin)
-                    state.out_cnt = std::max(1,array_period*(3+16)-config_.tRCDWR);
+                input_arrivals_.push_back(config_.gh_read_delay && pim_config_.df == 0
+                    ? feedback.input_ready_cycle : clk_);
                 ++state.m_it;
-                if (state.m_it == compute_.m_origin + compute_.m_extent) {
+            }
+            if (!input_arrivals_.empty() && clk_ >= input_arrivals_.front()) {
+                input_arrivals_.pop_front();
+                // Retain the approved array geometry and activation overlap.
+                // Start shifts on operand arrival, not data-command issue.
+                if (compute_.final_k && input_consumed_ == compute_.m_origin)
+                    state.out_cnt = std::max(1,array_period*result_pipeline_cycles-config_.tRCDWR);
+                ++input_consumed_;
+                if (input_consumed_ == compute_.m_origin + compute_.m_extent) {
                     result.events.push_back(PimProgress::BlockStreamingExhausted);
                     state.in_cnt = std::max(1,array_period*std::max(128/pim_config_.mc,16)-config_.tRCDRD);
                     ++state.iw_status;
@@ -189,7 +211,8 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
                     }
                 }
             }
-            if (state.iw_status != 2 || state.input_pending || wait_refresh || state.vpu_cnt) break;
+            if (state.iw_status != 2 || state.input_pending || wait_refresh || state.vpu_cnt ||
+                state.m_it == compute_.m_origin + compute_.m_extent) break;
             if (config_.row_lockstep) {
                 result.row = PimRowOperation::Build(config_, context_, state.m_it,
                     state.k_tile_it, compute_.m_origin + compute_.m_extent);
@@ -245,6 +268,9 @@ PimTickResult PimTileExecutor::Tick(uint64_t clk_, const PimTickFeedback& feedba
         const int M_tile_size_out = pim_config_.df == 1 ?
             (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
         const int M_out = pim_config_.df == 1 ? std::max(1,state.m*pim_config_.mcf/128) : state.m;
+        // Fixed output-tile footprint, not the number of active query/batch lanes.
+        // LH retains padding for unused lanes; equal write counts for small n
+        // do not imply that only one query's results are written.
         const int N_tile_size_out = 128;
         const int N_tile_num = (state.n-1)/N_tile_size_out+1;
         if (state.output_pending && !feedback.output_pending) {

@@ -12,7 +12,7 @@ parser.add_argument("-m", default="OPT_2.7B", help="Model to run")
 parser.add_argument("-i", default=1024, help="input tokens")
 parser.add_argument("-o", default=128, help="output tokens")
 parser.add_argument("-b", default=64, help="batch size")
-parser.add_argument("-s", default="configs/HBM2_8Gb_x128.ini", help="specification of DRAM")
+parser.add_argument("-s", default="configs/HBNPU_8Gb.ini", help="specification of DRAM")
 
 def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
 

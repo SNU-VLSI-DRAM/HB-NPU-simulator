@@ -19,6 +19,7 @@ class PimTileExecutorTestPeer {
         executor.LoadCompute(compute);
         executor.LoadOutput(output);
         executor.state_ = state;
+        executor.input_consumed_ = state.m_it;
     }
 };
 }
@@ -144,9 +145,15 @@ TEST_CASE("Invalid internal kernel geometry is rejected", "[pim][tile]") {
 
 TEST_CASE("Executor retires input vectors before starting same-tick output delay", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
-    int df = 0, expected = 4;
+    int df = 0, expected = 0;
     SECTION("GH") {}
-    SECTION("LH") { df = 1; expected = 23; }
+    SECTION("LH") { df = 1; expected = 1; }
+    SECTION("GH with shorter activation exposes full arithmetic delay") {
+        hardware.tRCDWR = 2; expected = 5;
+    }
+    SECTION("LH with shorter activation exposes full arithmetic delay") {
+        hardware.tRCDWR = 2; df = 1; expected = 13;
+    }
     auto context = MakeContext(64, 256, 128, df);
     PimTileExecutor executor(hardware, context);
     PimExecutionState state;
@@ -158,6 +165,47 @@ TEST_CASE("Executor retires input vectors before starting same-tick output delay
     REQUIRE(state.m_it == 1);
     REQUIRE(state.out_cnt == expected);
     REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::InputVectorIssued) == 1);
+}
+
+TEST_CASE("GH arrival deadlines advance through refresh without reissuing inputs",
+          "[pim][gh-arrival]") {
+    Config hw("configs/HBM2_8Gb_x128_pim.ini", ".");
+    hw.gh_read_delay = true;
+    PimTileExecutor executor(hw, MakeContext(64, 256, 128, 0));
+    PimExecutionState state;
+    state.m = 64; state.n = 256; state.k = 128;
+    state.in_pim = true; state.iw_status = 2; state.input_pending = true;
+    bool last = false;
+    SECTION("first arrival starts result stage") {}
+    SECTION("last arrival starts array drain") { last = true; state.m_it = 63; }
+    PimTileExecutorTestPeer::Prime(executor, state);
+    PimTickFeedback feedback;
+    feedback.input_ready_cycle = 110;
+    feedback.wait_refresh = true;
+    auto result = executor.Tick(100, feedback, PimDescriptorSource{});
+    REQUIRE(std::count(result.events.begin(), result.events.end(), PimProgress::InputVectorIssued) == 1);
+    REQUIRE(executor.Snapshot().iw_status == 2);
+    REQUIRE(executor.Snapshot().out_cnt == -1);
+    feedback.in_refresh = true;
+    for (int cycle = 101; cycle < 110; ++cycle) {
+        result = executor.Tick(cycle, feedback, PimDescriptorSource{});
+        REQUIRE(result.batch.operations.empty());
+        REQUIRE(executor.Snapshot().iw_status == 2);
+        REQUIRE(executor.Snapshot().out_cnt == -1);
+    }
+    result = executor.Tick(110, feedback, PimDescriptorSource{});
+    REQUIRE(result.batch.operations.empty());
+    if (last) {
+        REQUIRE(executor.Snapshot().iw_status == 3);
+        REQUIRE(executor.Snapshot().in_cnt == 50);
+        executor.Tick(111, feedback, PimDescriptorSource{});
+        REQUIRE(executor.Snapshot().in_cnt == 49);
+    } else {
+        REQUIRE(executor.Snapshot().out_cnt == 0);
+        executor.Tick(111, feedback, PimDescriptorSource{});
+        REQUIRE(executor.Snapshot().out_cnt == -1);
+        REQUIRE(executor.Snapshot().output_valid == 1);
+    }
 }
 
 TEST_CASE("Executor distinguishes pending data and refresh from data retirement", "[pim][tile]") {
