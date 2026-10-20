@@ -39,7 +39,14 @@ add_library(dramsim3 SHARED
     src/simple_stats.cc
     src/timing.cc
     src/memory_system.cc
-    src/pim_transaction.cc
+    src/hbnpu/pim_transaction.cc
+    src/hbnpu/legacy_tile_scheduler.cc
+    src/hbnpu/pim_tile_executor.cc
+    src/hbnpu/pim_row_operation.cc
+    src/hbnpu/pim_row_scheduler.cc
+    src/hbnpu/pim_instruction.cc
+    src/hbnpu/pim_instruction_buffer.cc
+    src/hbnpu/pim_instruction_sequencer.cc
 )
 
 if (THERMAL)
@@ -78,7 +85,7 @@ if (ADDR_TRACE)
 endif (ADDR_TRACE)
 
 
-target_include_directories(dramsim3 INTERFACE src)
+target_include_directories(dramsim3 PUBLIC src)
 target_compile_options(dramsim3 PRIVATE -Wall)
 target_link_libraries(dramsim3 PRIVATE inih format)
 set_target_properties(dramsim3 PROPERTIES
@@ -108,6 +115,12 @@ add_executable(dramsim3test
     tests/test_hmcsys.cc # IDK somehow this can literally crush your computer
     tests/test_pim.cc
     tests/test_pim_operations.cc
+    tests/test_pim_tiles.cc
+    tests/test_pim_instructions.cc
+    tests/test_pim_instruction_buffer.cc
+    tests/test_pim_instruction_sequencer.cc
+    tests/test_pim_instruction_pipeline.cc
+    tests/test_pim_rows.cc
 )
 target_link_libraries(dramsim3test Catch dramsim3)
 target_include_directories(dramsim3test PRIVATE src/)
@@ -121,6 +134,31 @@ set_tests_properties(dramsim3_unit PROPERTIES
 )
 
 find_package(PythonInterp 3 REQUIRED)
+add_test(NAME hbnpu_canonical_hardware
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_canonical_hardware.py
+            $<TARGET_FILE:dramsim3main>)
+set_tests_properties(hbnpu_canonical_hardware PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+add_test(NAME hbnpu_gqa_workloads
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_gqa_workloads.py)
+add_test(NAME hbnpu_gqa_cli
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_gqa_cli.py)
+add_test(NAME hbnpu_gqa_execution
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_gqa_execution.py
+            $<TARGET_FILE:dramsim3main>)
+set_tests_properties(hbnpu_gqa_workloads hbnpu_gqa_cli hbnpu_gqa_execution PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
+add_test(NAME hbnpu_instruction_translation
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_instruction_translation.py)
+add_test(NAME hbnpu_instruction_comparison
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_compare_instruction_execution.py)
+add_test(NAME hbnpu_instruction_transport
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_instruction_transport.py
+            $<TARGET_FILE:dramsim3main>)
 add_test(
     NAME hbnpu_gh_timing
     COMMAND ${PYTHON_EXECUTABLE} -B
@@ -162,6 +200,15 @@ set_tests_properties(hbnpu_quick_regression PROPERTIES
     LABELS "quick"
 )
 
+add_test(
+    NAME hbnpu_binary_comparison_unit
+    COMMAND ${PYTHON_EXECUTABLE} -B
+            ${PROJECT_SOURCE_DIR}/tests/regression/test_compare_binaries.py
+)
+set_tests_properties(hbnpu_binary_comparison_unit PROPERTIES
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    LABELS "quick"
+)
 add_test(
     NAME hbnpu_opt27b_end_to_end
     COMMAND ${PYTHON_EXECUTABLE}

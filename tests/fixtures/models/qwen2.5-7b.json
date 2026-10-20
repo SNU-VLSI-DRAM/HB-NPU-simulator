@@ -1,0 +1,14 @@
+{
+  "_source": "https://huggingface.co/Qwen/Qwen2.5-7B/blob/main/config.json",
+  "_note": "Matrix-relevant subset verified 2026-10-09; not a complete inference config.",
+  "model_type": "qwen2",
+  "hidden_size": 3584,
+  "intermediate_size": 18944,
+  "num_attention_heads": 28,
+  "num_key_value_heads": 4,
+  "num_hidden_layers": 28,
+  "max_position_embeddings": 131072,
+  "hidden_act": "silu",
+  "use_sliding_window": false,
+  "sliding_window": 131072
+}

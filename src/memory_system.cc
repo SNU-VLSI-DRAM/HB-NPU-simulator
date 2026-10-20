@@ -40,6 +40,7 @@ void MemorySystem::RegisterCallbacks(
 bool MemorySystem::WillAcceptTransaction() const {
     return dram_system_->WillAcceptTransaction();
 }
+void MemorySystem::RecordPimAdmissionStall() { dram_system_->RecordPimAdmissionStall(); }
 bool MemorySystem::WillAcceptTransaction(uint64_t hex_addr,
                                          bool is_write) const {
     return dram_system_->WillAcceptTransaction(hex_addr, is_write);

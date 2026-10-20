@@ -72,10 +72,12 @@ TraceBasedCPU::TraceBasedCPU(const std::string& config_file,
 
 void TraceBasedCPU::ClockTick() {
     memory_system_.ClockTick();
-    if (!trace_file_.eof()) {
+    // EOF prevents fetching another record, not retrying a retained last word.
+    if (!trace_file_.eof() || !get_next_) {
         if (get_next_) {
             get_next_ = false;
             trace_file_ >> trans_;
+            if (trace_file_.fail()) trans_.active=false;
         }
         if (trans_.added_cycle <= clk_ && trans_.active) {
             if (!trans_.is_pim) {
@@ -87,6 +89,7 @@ void TraceBasedCPU::ClockTick() {
             else {
 				get_next_ = memory_system_.WillAcceptTransaction();
                 if (get_next_) memory_system_.AddTransaction(trans_.addr);
+                else memory_system_.RecordPimAdmissionStall();
             }
         }
     }

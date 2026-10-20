@@ -1,7 +1,7 @@
 #ifndef __PIM_CONFIG_H
 #define __PIM_CONFIG_H
 
-#include "pim_transaction.h"
+#include "hbnpu/pim_transaction.h"
 
 namespace dramsim3 {
 

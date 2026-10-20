@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "common.h"
-#include "pim_operation.h"
+#include "hbnpu/pim_operation.h"
 
 namespace dramsim3 {
 

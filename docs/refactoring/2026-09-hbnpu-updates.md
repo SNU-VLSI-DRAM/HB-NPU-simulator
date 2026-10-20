@@ -28,11 +28,11 @@ The resulting ownership boundaries are:
 
 | Component | Responsibility |
 |---|---|
-| `src/pim_transaction.{h,cc}` | Decode configuration, workload, and launch transactions |
-| `src/pim_config.h` | Kernel/dataflow configuration, including an explicit initialized flag |
-| `src/pim_execution_state.h` | One array's dimensions, iterators, stage counters, and pending-vector state |
-| `src/pim_operation.h` | Logical PIM opcode, target banks, release cycle, and operation validation |
-| `src/pim_command_batch.h` | Preserve operation boundaries and source classification during dispatch |
+| `src/hbnpu/pim_transaction.{h,cc}` | Decode configuration, workload, and launch transactions |
+| `src/hbnpu/pim_config.h` | Kernel/dataflow configuration, including an explicit initialized flag |
+| `src/hbnpu/pim_execution_state.h` | One array's dimensions, iterators, stage counters, and pending-vector state |
+| `src/hbnpu/pim_operation.h` | Logical PIM opcode, target banks, release cycle, and operation validation |
+| `src/hbnpu/pim_command_batch.h` | Preserve operation boundaries and source classification during dispatch |
 | `src/dram_system.cc` | Generate desired data operations and advance kernel progress |
 | `src/controller.cc` | Queue and arbitrate operations, issue one eligible logical PIM command, collect bank-level activity |
 | `src/channel_state.cc` | Check bank prerequisites and aggregate activation-window readiness |

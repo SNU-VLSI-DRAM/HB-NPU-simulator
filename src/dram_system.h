@@ -2,15 +2,20 @@
 #define __DRAM_SYSTEM_H
 
 #include <fstream>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "common.h"
 #include "configuration.h"
 #include "controller.h"
-#include "pim_command_batch.h"
-#include "pim_config.h"
-#include "pim_execution_state.h"
+#include "hbnpu/pim_command_batch.h"
+#include "hbnpu/pim_config.h"
+#include "hbnpu/pim_execution_state.h"
+#include "hbnpu/pim_tile_executor.h"
+#include "hbnpu/legacy_tile_scheduler.h"
+#include "hbnpu/pim_instruction_sequencer.h"
+#include "hbnpu/pim_row_scheduler.h"
 #include "timing.h"
 
 #ifdef THERMAL
@@ -28,7 +33,8 @@ class BaseDRAMSystem {
     void RegisterCallbacks(std::function<void(uint64_t)> read_callback,
                            std::function<void(uint64_t)> write_callback);
     void PrintEpochStats();
-    void PrintStats();
+    virtual void PrintStats();
+    virtual void RecordPimAdmissionStall() {}
     void ResetStats();
 
     virtual bool WillAcceptTransaction() const = 0;
@@ -77,6 +83,10 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool AddTransaction(uint64_t hex_addr, bool is_write) override;
     void ClockTick() override;
     Command GetReadyCommandPIM(Transaction trans, CommandType type);
+    void PrintStats() override;
+    void RecordPimAdmissionStall() override {
+        if (config_.tile_instructions) ++cpu_backpressure_cycles_;
+    }
 
    private:
     void ReturnCompletedTransactions();
@@ -86,8 +96,15 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
     void DispatchCommands(const PimCommandBatch& batch);
     bool PendingPimSource(PimSource source) const;
+    uint64_t PimReadReadyCycle(PimSource source) const;
     void TickControllers();
     PimDataflowConfig pim_config_;
+    std::unique_ptr<PimTileExecutor> tile_executor_;
+    std::unique_ptr<LegacyTileScheduler> tile_scheduler_;
+    std::unique_ptr<PimInstructionBuffer> instruction_buffer_;
+    std::unique_ptr<PimInstructionSequencer> instruction_sequencer_;
+    std::unique_ptr<PimRowScheduler> row_scheduler_;
+    uint64_t cpu_backpressure_cycles_ = 0;
 
    public:
     PimExecutionState execution_;

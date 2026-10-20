@@ -29,6 +29,7 @@ class MemorySystem {
 
     bool WillAcceptTransaction() const;
     bool AddTransaction(uint64_t hex_addr);
+    void RecordPimAdmissionStall();
     bool WillAcceptTransaction(uint64_t hex_addr, bool is_write) const;
     bool AddTransaction(uint64_t hex_addr, bool is_write);
     bool turnOff();

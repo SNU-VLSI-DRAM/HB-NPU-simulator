@@ -1,7 +1,8 @@
 #include "dram_system.h"
-#include "pim_transaction.h"
+#include "hbnpu/pim_transaction.h"
 #include <assert.h>
 #include <cmath>
+#include "json.hpp"
 namespace dramsim3 {
 
 // alternative way is to assign the id in constructor but this is less
@@ -98,6 +99,10 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
                                  std::function<void(uint64_t)> read_callback,
                                  std::function<void(uint64_t)> write_callback)
     : BaseDRAMSystem(config, output_dir, read_callback, write_callback) {
+    if (config_.tile_instructions) {
+        instruction_buffer_.reset(new PimInstructionBuffer(config_.instruction_capacity));
+        instruction_sequencer_.reset(new PimInstructionSequencer(config_));
+    }
     if (config_.IsHMC()) {
         std::cerr << "Initialized a memory system with an HMC config file!"
                   << std::endl;
@@ -113,6 +118,8 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
 #endif  // THERMAL
     }
 
+    if (config_.row_lockstep)
+        row_scheduler_.reset(new PimRowScheduler(config_, ctrls_));
     int banks =  config_.ranks * config_.bankgroups * config_.banks_per_group;
     // std::cout<<"rank: "<<config_.ranks<<" bgs: "<<config_.bankgroups<<" bpg: "<<config_.banks_per_group<<std::endl;
     for (auto i = 0; i < config_.channels; i++) {
@@ -130,10 +137,16 @@ JedecDRAMSystem::~JedecDRAMSystem() {
 
 
 bool JedecDRAMSystem::WillAcceptTransaction() const {
+    if (instruction_buffer_) return instruction_buffer_->CanAcceptWord();
     return pim_trans_queue_.size() < pim_trans_queue_depth_;
 }
 
 bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr) {
+    if (instruction_buffer_) {
+        bool accepted=instruction_buffer_->PushWord(hex_addr);
+        if (accepted) last_req_clk_=clk_;
+        return accepted;
+    }
 // Record trace - Record address trace for debugging or other purposes
 #ifdef ADDR_TRACE
     address_trace_ << std::hex << hex_addr << std::dec << " "
@@ -179,10 +192,30 @@ bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr, bool is_write) {
 
 void JedecDRAMSystem::ClockTick() {
     ReturnCompletedTransactions();
+    if (row_scheduler_) row_scheduler_->Tick(clk_);
     bool wait_refresh = CheckRefreshWindow();
-    ProcessPimTransaction();
-    bool is_in_ref = PimCommandsBlockedByRefresh();
-    SchedulePimCommands(wait_refresh, is_in_ref);
+    if (instruction_buffer_) {
+        instruction_buffer_->Tick(clk_);
+        PimTickFeedback feedback;
+        feedback.wait_refresh=wait_refresh;
+        feedback.in_refresh=PimCommandsBlockedByRefresh();
+        feedback.weight_pending=PendingPimSource(PimSource::WEIGHT);
+        feedback.input_pending=PendingPimSource(PimSource::INPUT);
+        feedback.output_pending=PendingPimSource(PimSource::OUTPUT);
+        feedback.weight_ready_cycle=PimReadReadyCycle(PimSource::WEIGHT);
+        feedback.input_ready_cycle=PimReadReadyCycle(PimSource::INPUT);
+        if (row_scheduler_) feedback.row_vectors_completed=row_scheduler_->CompletedVectors();
+        auto result=instruction_sequencer_->Tick(clk_,*instruction_buffer_,feedback);
+        execution_=instruction_sequencer_->Snapshot();
+        if (execution_.in_pim) for (auto* controller:ctrls_) controller->in_pim=true;
+        DispatchCommands(result.batch);
+        if (result.row.vectors) row_scheduler_->Submit(std::move(result.row), clk_);
+        turn_off=instruction_sequencer_->Complete();
+    } else {
+        ProcessPimTransaction();
+        bool is_in_ref = PimCommandsBlockedByRefresh();
+        SchedulePimCommands(wait_refresh, is_in_ref);
+    }
     TickControllers();
     clk_++;
     if (clk_ % config_.epoch_period == 0) {
@@ -215,7 +248,8 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
     // if countdown is lower than pim delay, pause issuing pim commands until refresh is done over all ranks
     bool wait_refresh = false;
     for (size_t i=0; i<ctrls_.size(); i++) {
-        if (ctrls_[i]->pim_refresh_coming() && pim_config_.configured) {
+        if (ctrls_[i]->pim_refresh_coming() &&
+            (pim_config_.configured || (instruction_sequencer_ && execution_.in_pim))) {
             wait_refresh = true;
             // std::cout<<clk_ << "\tWait Refresh\n";
         }
@@ -238,6 +272,10 @@ void JedecDRAMSystem::ProcessPimTransaction() {
             if (pim_config_.configured && execution_.m != 0 &&
                 execution_.n != 0 && execution_.k != 0) {
                 execution_.in_pim = true;
+                tile_executor_.reset(new PimTileExecutor(
+                    config_, PimKernelContext::Capture(pim_config_, execution_)));
+                tile_scheduler_.reset(new LegacyTileScheduler(
+                    PimKernelContext::Capture(pim_config_, execution_), config_.channels));
                 pim_trans_queue_.erase(it);
             }
             for (size_t i=0; i<ctrls_.size(); i++) {
@@ -249,6 +287,8 @@ void JedecDRAMSystem::ProcessPimTransaction() {
         case PimTransactionKind::LOAD_DATAFLOW_CONFIG: {
             pim_config_.Load(decoded);
             execution_ = PimExecutionState();
+            tile_executor_.reset();
+            tile_scheduler_.reset();
 
             pim_trans_queue_.erase(it);
             break;
@@ -300,192 +340,40 @@ bool JedecDRAMSystem::PendingPimSource(PimSource source) const {
     return false;
 }
 
+uint64_t JedecDRAMSystem::PimReadReadyCycle(PimSource source) const {
+    uint64_t ready = 0;
+    for (const auto* controller : ctrls_)
+        ready = std::max(ready, controller->PimReadReadyCycle(source));
+    return ready;
+}
+
 void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
-    if (!pim_config_.configured || !execution_.in_pim || is_in_ref) return;
-    PimExecutionState& state = execution_;
-    const int N_tile_size = 128;
-    const int K_tile_size = std::min(config_.channels * 16, state.k);
-    const int array_period = pim_config_.df == 0 ? config_.tCCD_S : config_.tCCD_L;
-    const int weight_banks_reduce = pim_config_.df == 0 ? 8 : 16;
-    const int N_tile_size_per_bank = std::min(state.n,
-        (N_tile_size-1)/(config_.banks/weight_banks_reduce)+1);
-    const bool output_ready = state.iw_status == 3;
-    PimCommandBatch batch;
-    auto add_vector = [&](PimSource source, const std::vector<Command>& commands) {
-        if (commands.empty()) return;
-        PimOperation operation(commands.front(),clk_);
-        if (operation.IsLocal()) {
-            operation.commands = commands;
-            batch.Add(source,operation);
-        } else {
-            for (const auto& cmd : commands) batch.Add(source,PimOperation(cmd,clk_));
-        }
+    if (!pim_config_.configured || !execution_.in_pim ||
+        (is_in_ref && !config_.gh_read_delay)) return;
+    PimTickFeedback feedback;
+    feedback.wait_refresh = wait_refresh;
+    feedback.in_refresh = is_in_ref;
+    feedback.weight_pending = PendingPimSource(PimSource::WEIGHT);
+    feedback.input_pending = PendingPimSource(PimSource::INPUT);
+    feedback.output_pending = PendingPimSource(PimSource::OUTPUT);
+    feedback.weight_ready_cycle = PimReadReadyCycle(PimSource::WEIGHT);
+    feedback.input_ready_cycle = PimReadReadyCycle(PimSource::INPUT);
+    PimDescriptorSource source;
+    source.next_compute = [this](PimComputeBlock& block) {
+        return tile_scheduler_->NextCompute(block);
     };
-
-    switch (state.iw_status) {
-        case 0: {
-            // Completion means every addressed bank issued its data command,
-            // not merely that the vector was accepted or activated.
-            if (state.weight_pending && !PendingPimSource(PimSource::WEIGHT)) {
-                state.weight_pending = false;
-                int N_tile_it = state.n_it/N_tile_size;
-                ++state.n_it;
-                if (state.n_it % N_tile_size_per_bank == 0 &&
-                    (N_tile_size == N_tile_size_per_bank || state.n_it % N_tile_size != 0)) {
-                    state.n_it = N_tile_size*N_tile_it;
-                    ++state.iw_status;
-                }
-            }
-            if (state.iw_status != 0 || state.weight_pending || wait_refresh) break;
-            int N_tile_it = state.n_it/N_tile_size;
-            int col_offset = N_tile_it*(N_tile_size_per_bank*((state.k-1)/K_tile_size+1)) +
-                             state.k_tile_it*N_tile_size_per_bank + state.n_it%N_tile_size;
-            for (int ch=0; ch<config_.channels; ++ch) {
-                std::vector<Command> commands;
-                for (int k=0; k<config_.banks/weight_banks_reduce; ++k) {
-                    int bank = k*weight_banks_reduce;
-                    Address addr(ch,0,bank/config_.banks_per_group,bank%config_.banks_per_group,
-                        state.base_row_weight+col_offset/(config_.columns/config_.BL),
-                        col_offset%(config_.columns/config_.BL));
-                    bool exit = (state.n_it+1)%N_tile_size_per_bank == 0 &&
-                        (N_tile_size == N_tile_size_per_bank || (state.n_it+1)%N_tile_size != 0);
-                    bool close = (addr.column+1)%std::min(state.n,128/config_.banks*weight_banks_reduce)==0 ||
-                                 (addr.column+1)%(config_.columns/config_.BL)==0 || exit;
-                    commands.emplace_back(close ? CommandType::GH_READ_PRECHARGE : CommandType::GH_READ,
-                                          addr,config_.AddressUnmapping(addr));
-                }
-                add_vector(PimSource::WEIGHT,commands);
-            }
-            state.weight_pending = true;
-            break;
-        }
-        case 1:
-            ++state.iw_status;
-            state.vpu_cnt = 1;
-            break;
-        case 2: {
-            state.vpu_cnt = std::max(0,state.vpu_cnt-1);
-            if (state.input_pending && !PendingPimSource(PimSource::INPUT)) {
-                state.input_pending = false;
-                int M_tile_it = state.m_it/pim_config_.m_tile_size;
-                int N_tile_it = state.n_it/N_tile_size;
-                // Retain the approved array geometry and activation overlap.
-                // Trigger these counters on completed data vectors, never PRE.
-                if ((state.k_tile_it+1)*K_tile_size >= state.k &&
-                    state.m_it%pim_config_.m_tile_size == 0)
-                    state.out_cnt = std::max(1,array_period*(3+16)-config_.tRCDWR);
-                ++state.m_it;
-                if (state.m_it%pim_config_.m_tile_size == 0 || state.m_it == state.m) {
-                    state.in_cnt = std::max(1,array_period*std::max(128/pim_config_.mc,16)-config_.tRCDRD);
-                    ++state.iw_status;
-                    state.m_it = pim_config_.m_tile_size*M_tile_it;
-                    ++state.k_tile_it;
-                    if (state.k_tile_it*K_tile_size >= state.k) {
-                        state.k_tile_it = 0;
-                        state.n_it = N_tile_size*(N_tile_it+1);
-                        if (state.n_it >= state.n) {
-                            state.n_it = 0;
-                            state.m_it = pim_config_.m_tile_size*(M_tile_it+1);
-                            if (state.m_it >= state.m) {
-                                std::cout << clk_ << " End of Computation 0" << std::endl;
-                                state.in_cnt = -1;
-                            }
-                        }
-                    }
-                }
-            }
-            if (state.iw_status != 2 || state.input_pending || wait_refresh || state.vpu_cnt) break;
-            int M_tile_it = state.m_it/pim_config_.m_tile_size;
-            int M_current_tile_size = state.m < pim_config_.m_tile_size*(M_tile_it+1) ?
-                                      state.m%pim_config_.m_tile_size : pim_config_.m_tile_size;
-            int col_offset = M_tile_it*(pim_config_.m_tile_size*((state.k-1)/K_tile_size+1)) +
-                             state.k_tile_it*M_current_tile_size + state.m_it%pim_config_.m_tile_size;
-            for (int ch=0; ch<config_.channels; ++ch) {
-                std::vector<Command> commands;
-                for (int k=0; k<pim_config_.mc; ++k) {
-                    int bank = k*(config_.banks/pim_config_.mc) + (pim_config_.df == 0 ? 1 : 0);
-                    Address addr(ch,0,bank/config_.banks_per_group,bank%config_.banks_per_group,
-                        state.base_row_in+col_offset/(config_.columns/config_.BL),
-                        col_offset%(config_.columns/config_.BL));
-                    bool close = state.m_it+1 == state.m;
-                    if (pim_config_.df == 0) close &= (state.k_tile_it+1)*K_tile_size >= state.k;
-                    close |= addr.column == config_.columns/config_.BL-1;
-                    CommandType type = pim_config_.df == 0 ?
-                        (close ? CommandType::GH_READ_PRECHARGE : CommandType::GH_READ) :
-                        (close ? CommandType::LH_READ_PRECHARGE : CommandType::LH_READ);
-                    commands.emplace_back(type,addr,config_.AddressUnmapping(addr));
-                }
-                add_vector(PimSource::INPUT,commands);
-            }
-            state.input_pending = true;
-            break;
-        }
-        case 3:
-            if (state.in_cnt != -1) {
-                state.in_cnt = std::max(0,state.in_cnt-1);
-                if (state.in_cnt == 0 && state.output_valid == 0) state.iw_status = 0;
-            }
-            break;
-        default: break;
-    }
-
-    if (state.out_cnt == 0) ++state.output_valid;
-    if (state.out_cnt != -1) --state.out_cnt;
-
-    if (state.output_valid > 0 && output_ready) {
-        const int M_tile_size_out = pim_config_.df == 1 ?
-            (pim_config_.m_tile_size/128)*pim_config_.mcf : pim_config_.m_tile_size;
-        const int M_out = pim_config_.df == 1 ? std::max(1,state.m*pim_config_.mcf/128) : state.m;
-        const int N_out = pim_config_.df == 1 ? 128 : state.n;
-        const int N_tile_size_out = 128;
-        const int N_tile_num = (state.n-1)/N_tile_size_out+1;
-        if (state.output_pending && !PendingPimSource(PimSource::OUTPUT)) {
-            state.output_pending = false;
-            int M_out_tile_it = state.m_out_it/M_tile_size_out;
-            ++state.m_out_it;
-            if (state.m_out_it%M_tile_size_out == 0 || state.m_out_it == M_out) {
-                state.m_out_it = M_tile_size_out*M_out_tile_it;
-                ++state.n_out_tile_it;
-                if (state.n_out_tile_it*N_tile_size_out >= N_out) {
-                    state.n_out_tile_it = 0;
-                    state.m_out_it = M_tile_size_out*(M_out_tile_it+1);
-                    if (state.m_out_it >= M_out) {
-                        assert(state.in_cnt == -1);
-                        assert(!PendingPimSource(PimSource::INPUT) && !PendingPimSource(PimSource::WEIGHT));
-                        std::cout << clk_ << " Output Exhausted: Array0. Turn off PIM mode.\n";
-                        state.in_pim = false;
-                        turn_off = true;
-                    }
-                }
-                --state.output_valid;
-            }
-        }
-        if (state.in_pim && state.output_valid > 0 && !state.output_pending && !wait_refresh) {
-            int M_out_tile_it = state.m_out_it/M_tile_size_out;
-            int M_out_current_tile_size = M_out < M_tile_size_out*(M_out_tile_it+1) ?
-                M_out%M_tile_size_out : M_tile_size_out;
-            int col_offset = M_out_tile_it*(M_tile_size_out*N_tile_num) +
-                state.n_out_tile_it*M_out_current_tile_size + state.m_out_it%M_tile_size_out;
-            for (int ch=0; ch<config_.channels; ++ch) {
-                std::vector<Command> commands;
-                int count = pim_config_.df == 1 ? 1 : pim_config_.mc;
-                for (int k=0; k<count; ++k) {
-                    int bank = k*(config_.banks/pim_config_.mc) + (pim_config_.df == 0 ? 1 : 0);
-                    int group = bank/config_.banks_per_group;
-                    bank = bank%config_.banks_per_group + (pim_config_.df == 0 ? 2 : 0);
-                    Address addr(ch,0,group,bank,
-                        state.base_row_output+col_offset/(config_.columns/config_.BL),
-                        col_offset%(config_.columns/config_.BL));
-                    bool close = state.m_out_it+1 == M_out || addr.column == config_.columns/config_.BL-1;
-                    commands.emplace_back(close ? CommandType::PIM_WRITE_PRECHARGE : CommandType::PIM_WRITE,
-                                          addr,config_.AddressUnmapping(addr));
-                }
-                add_vector(PimSource::OUTPUT,commands);
-            }
-            state.output_pending = true;
-        }
-    }
-    DispatchCommands(batch);
+    source.next_output = [this](PimOutputBlock& block) {
+        return tile_scheduler_->NextOutput(block);
+    };
+    auto result = tile_executor_->Tick(clk_, feedback, source);
+    execution_ = tile_executor_->Snapshot();
+    tile_scheduler_->ProjectProgress(execution_, result.compute_exhausted, result.output_exhausted);
+    if (result.computation_finished)
+        std::cout << clk_ << " End of Computation 0" << std::endl;
+    if (result.finished)
+        std::cout << clk_ << " Output Exhausted: Array0. Turn off PIM mode.\n";
+    DispatchCommands(result.batch);
+    if (result.finished) turn_off = true;
 }
 
 void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
@@ -493,6 +381,46 @@ void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
         const auto& operation = item.second;
         ctrls_[operation.commands.front().Channel()]->EnqueuePimOperation(item.first,operation);
     }
+}
+
+void JedecDRAMSystem::PrintStats() {
+    BaseDRAMSystem::PrintStats();
+    if (!instruction_buffer_) return;
+    const auto& ingress=instruction_buffer_->Stats();
+    const auto& sequence=instruction_sequencer_->Stats();
+    nlohmann::json stats;
+    stats["admitted_words"]=ingress.admitted_words;
+    stats["decoded_instructions"]=ingress.decoded_instructions;
+    stats["raw_high_watermark"]=ingress.raw_high_watermark;
+    stats["slot_high_watermark"]=ingress.slot_high_watermark;
+    stats["partial_packet_cycles"]=ingress.partial_packet_cycles;
+    stats["raw_words"]=instruction_buffer_->RawSize();
+    stats["instruction_slots"]=instruction_buffer_->SlotSize();
+    stats["partial_packet"]=instruction_buffer_->HasPartialPacket();
+    stats["dispatched_instructions"]=sequence.dispatched_instructions;
+    stats["retired_instructions"]=sequence.retired_instructions;
+    stats["compute_resource_stall_cycles"]=sequence.compute_resource_stall_cycles;
+    stats["load_resource_stall_cycles"]=sequence.load_resource_stall_cycles;
+    stats["output_resource_stall_cycles"]=sequence.output_resource_stall_cycles;
+    stats["instruction_starvation_cycles"]=sequence.instruction_starvation_cycles;
+    stats["backend_drained"]=sequence.backend_drained;
+    stats["backend_drain_cycle"]=sequence.backend_drain_cycle;
+    stats["end_completed"]=sequence.end_completed;
+    stats["end_cycle"]=sequence.end_cycle;
+    stats["cpu_backpressure_cycles"]=cpu_backpressure_cycles_;
+    stats["status"]=sequence.end_completed ? "complete" : "incomplete";
+    stats["executor_stage"]=execution_.iw_status;
+    stats["simulated_cycles"]=clk_;
+    stats["row_lockstep"] = bool(row_scheduler_);
+    if (row_scheduler_) {
+        const auto& rows = row_scheduler_->Stats();
+        stats["row_operations_launched"] = rows.launched;
+        stats["row_operations_completed"] = rows.completed;
+        stats["row_boundary_wait_cycles"] = rows.boundary_wait_cycles;
+    }
+    std::ofstream out(config_.output_dir+"hbnpu_instruction.json");
+    out << stats.dump(2) << '\n';
+    if (!sequence.end_completed) std::cout << "HB-NPU instruction program incomplete at cycle " << clk_ << '\n';
 }
 
 void JedecDRAMSystem::TickControllers() {

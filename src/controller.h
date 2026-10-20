@@ -47,6 +47,15 @@ class Controller {
     void EnqueueOutputCommands(const std::vector<Command>& commands);
     void EnqueuePimOperation(PimSource source, const PimOperation& operation);
     bool HasPendingPim(PimSource source) const;
+    uint64_t PimReadReadyCycle(PimSource source) const {
+        return source == PimSource::WEIGHT ? weight_ready_cycle_ : input_ready_cycle_;
+    }
+    void PreparePimRow(const std::vector<PimOperation>& operations, int operations_per_vector);
+    bool CanLaunchPimRow(uint64_t refresh_budget) const;
+    void LaunchPimRow(uint64_t cycle);
+    void FinishPimRow();
+    size_t PimRowIssued() const { return row_next_; }
+    uint64_t PimRefreshInterval() const { return refresh_.Interval(); }
 
     int channel_id_;
 
@@ -64,6 +73,16 @@ class Controller {
    private:
     uint64_t clk_;
     uint64_t next_global_io_cycle_ = 0;
+    uint64_t weight_ready_cycle_ = 0, input_ready_cycle_ = 0;
+    std::vector<PimOperation> row_operations_;
+    size_t row_next_ = 0;
+    int row_width_ = 0;
+    bool row_running_ = false;
+    uint64_t row_start_ = 0;
+    bool PrepareRowBanks();
+    bool IssueRowBeat();
+    void IssuePim(const PimOperation&);
+    void RecordReadArrival(const PimOperation&, PimSource);
     const Config &config_;
     SimpleStats simple_stats_;
     ChannelState channel_state_;
@@ -106,7 +125,7 @@ class Controller {
     void UpdateCommandStats(const Command &cmd);
     bool PimQueuesEmpty() const;
     bool HasPendingPimInRank(int rank) const;
-    bool SchedulePimQueue(std::vector<PimOperation>& queue, bool input);
+    bool SchedulePimQueue(std::vector<PimOperation>& queue, PimSource source);
     void EnqueuePimCommands(PimSource source, const std::vector<Command>& commands,
                             const std::vector<int>& releases);
 };

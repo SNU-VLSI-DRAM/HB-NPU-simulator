@@ -140,8 +140,115 @@ void Controller::EnqueueOutputCommands(const std::vector<Command>& commands) {
 }
 
 bool Controller::HasPendingPim(PimSource source) const {
+    if (source == PimSource::INPUT && !row_operations_.empty()) return true;
     return !(source == PimSource::WEIGHT ? rd_w_cmds_ :
              source == PimSource::INPUT ? rd_in_cmds_ : wr_cmds_).empty();
+}
+
+void Controller::PreparePimRow(const std::vector<PimOperation>& operations,
+                               int width) {
+    if (!row_operations_.empty() || operations.empty() || width <= 0 ||
+        operations.size() % width)
+        throw std::invalid_argument("Invalid PIM row reservation");
+    for (const auto& op : operations) {
+        op.Validate(config_);
+        if (!op.IsData() || op.commands.front().Channel() != channel_id_)
+            throw std::invalid_argument("Invalid PIM row target");
+    }
+    row_operations_ = operations;
+    row_width_ = width;
+    row_next_ = 0;
+    row_running_ = false;
+}
+
+bool Controller::CanLaunchPimRow(uint64_t budget) const {
+    if (row_operations_.empty() || row_running_ || !PimQueuesEmpty() ||
+        channel_state_.IsRefreshWaiting() ||
+        refresh_.CyclesToDeadline() <= budget)
+        return false;
+    for (int i = 0; i < row_width_; ++i) {
+        auto probe = row_operations_[i];
+        probe.release_cycle = 0;
+        auto ready = channel_state_.GetReadyPimOperation(probe, clk_);
+        if (!ready.IsValid() || ready.opcode != probe.opcode ||
+            (ready.IsGlobal() && clk_ < next_global_io_cycle_))
+            return false;
+    }
+    return true;
+}
+
+void Controller::LaunchPimRow(uint64_t cycle) {
+    if (row_operations_.empty() || row_running_ || cycle != clk_)
+        throw std::logic_error("Invalid PIM row launch");
+    row_start_ = cycle;
+    row_running_ = true;
+}
+
+void Controller::FinishPimRow() {
+    if (!row_running_ || row_next_ != row_operations_.size())
+        throw std::logic_error("PIM row released before completion");
+    row_running_ = false;
+    row_operations_.clear();
+}
+
+void Controller::IssuePim(const PimOperation& ready) {
+#ifdef CMD_TRACE
+    pim_trace_ << clk_ << " " << channel_id_ << " " << ready.Name() << " "
+               << ready.commands.front().Rank() << " ";
+    for (size_t target = 0; target < ready.commands.size(); ++target) {
+        if (target) pim_trace_ << ",";
+        pim_trace_ << ready.commands[target].Bankgroup() << ":"
+                   << ready.commands[target].Bank();
+    }
+    pim_trace_ << std::endl;
+#endif
+    for (const auto& cmd : ready.commands) IssueCommand(cmd);
+    if (ready.IsGlobal())
+        next_global_io_cycle_ = clk_ + std::max(1, config_.tCCD_S);
+}
+
+void Controller::RecordReadArrival(const PimOperation& issued, PimSource source) {
+    if (issued.opcode != PimOpcode::GH_READ &&
+        issued.opcode != PimOpcode::GH_READ_PRECHARGE) return;
+    auto& ready = source == PimSource::WEIGHT ? weight_ready_cycle_ : input_ready_cycle_;
+    // This records the actual data command, never its ACT/PRE prerequisite.
+    ready = clk_ + (config_.gh_read_delay ? config_.read_delay : 0);
+}
+
+bool Controller::PrepareRowBanks() {
+    // Boundary work may wait, but must never consume a data beat before START.
+    for (int i = 0; i < row_width_; ++i) {
+        auto probe = row_operations_[i];
+        probe.release_cycle = 0;
+        auto ready = channel_state_.GetReadyPimOperation(probe, clk_);
+        if (!ready.IsValid() || ready.IsData() ||
+            (ready.IsActivate() &&
+             (channel_state_.IsRefreshWaiting() || pim_refresh_coming())))
+            continue;
+        IssuePim(ready);
+        return true;
+    }
+    return false;
+}
+
+bool Controller::IssueRowBeat() {
+    if (channel_state_.IsRefreshWaiting())
+        throw std::runtime_error(
+            "PIM row predictability violation: refresh inside stream");
+    if (row_next_ == row_operations_.size()) return false;
+    auto op = row_operations_[row_next_];
+    op.release_cycle += row_start_;
+    if (clk_ < op.release_cycle) return false;
+    auto ready = channel_state_.GetReadyPimOperation(op, clk_);
+    if (clk_ != op.release_cycle || !ready.IsValid() ||
+        ready.opcode != op.opcode ||
+        (ready.IsGlobal() && clk_ < next_global_io_cycle_))
+        throw std::runtime_error(
+            "PIM row predictability violation: missed scheduled beat");
+    IssuePim(ready);
+    RecordReadArrival(ready, PimSource::INPUT);
+    ++row_next_;
+    return true;
 }
 
 bool Controller::PimQueuesEmpty() const {
@@ -149,6 +256,7 @@ bool Controller::PimQueuesEmpty() const {
 }
 
 bool Controller::HasPendingPimInRank(int rank) const {
+    if (!row_operations_.empty() && row_operations_.front().commands.front().Rank() == rank) return true;
     for (const auto* queue : {&rd_w_cmds_, &rd_in_cmds_, &wr_cmds_}) {
         for (const auto& operation : *queue) {
             // Enqueue validation guarantees every target belongs to this rank.
@@ -158,7 +266,7 @@ bool Controller::HasPendingPimInRank(int rank) const {
     return false;
 }
 
-bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, bool input) {
+bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, PimSource source) {
     // An unready target may not hold another bank's eligible transfer hostage.
     // Preserve per-bank order while permitting A,B,A,B interleaving.
     std::set<std::tuple<int,int,int>> blocked_banks;
@@ -173,22 +281,13 @@ bool Controller::SchedulePimQueue(std::vector<PimOperation>& queue, bool input) 
         auto ready = channel_state_.GetReadyPimOperation(pending,clk_);
         if (!ready.IsValid() || (ready.IsGlobal() && clk_ < next_global_io_cycle_) ||
             (ready.IsActivate() && channel_state_.IsRefreshWaiting())) continue;
-#ifdef CMD_TRACE
-        pim_trace_ << clk_ << " " << channel_id_ << " " << ready.Name() << " "
-                   << ready.commands.front().Rank() << " ";
-        for (size_t target=0; target<ready.commands.size(); ++target) {
-            if (target) pim_trace_ << ",";
-            pim_trace_ << ready.commands[target].Bankgroup() << ":" << ready.commands[target].Bank();
-        }
-        pim_trace_ << std::endl;
-#endif
         // All bank prerequisites and aggregate activation cost were checked
         // without mutation. Issue the validated broadcast's physical effects.
-        for (const auto& cmd : ready.commands) IssueCommand(cmd);
-        if (ready.IsGlobal()) next_global_io_cycle_ = clk_ + std::max(1,config_.tCCD_S);
+        IssuePim(ready);
         if (ready.opcode == pending.opcode) {
+            RecordReadArrival(ready, source);
             queue.erase(queue.begin()+i);
-            if (input) release_time.erase(release_time.begin()+i);
+            if (source == PimSource::INPUT) release_time.erase(release_time.begin()+i);
         }
         return true;
     }
@@ -202,44 +301,49 @@ void Controller::ClockTick() {
     bool cmd_issued = false;
     Command cmd;
 
-    // priority 1: refresh command
-    if (channel_state_.IsRefreshWaiting()) {
-        cmd = cmd_queue_.FinishRefresh();
-    }
-    const bool refresh_command = cmd.IsValid();
+    if (row_running_) {
+        // Exclusive channel reservation also covers cadence gaps between beats.
+        cmd_issued = IssueRowBeat();
+    } else {
+        // priority 1: refresh command
+        if (channel_state_.IsRefreshWaiting()) {
+            cmd = cmd_queue_.FinishRefresh();
+        }
+        const bool refresh_command = cmd.IsValid();
 
-    // cannot find a refresh related command or there's no refresh
-    // priority 3: general command
-    if (!cmd.IsValid() && PimQueuesEmpty()) {
-        cmd = cmd_queue_.GetCommandToIssue();
-    }
+        // cannot find a refresh related command or there's no refresh
+        // priority 3: general command
+        if (!cmd.IsValid() && PimQueuesEmpty() && row_operations_.empty()) {
+            cmd = cmd_queue_.GetCommandToIssue();
+        }
 
-    // priority 2: pim command
-    if (refresh_command || PimQueuesEmpty()) {
+        // priority 2: pim command
+        if (refresh_command || (PimQueuesEmpty() && row_operations_.empty())) {
+            if (cmd.IsValid()) {
+                IssueCommand(cmd);
+                cmd_issued = true;
 
-        if (cmd.IsValid()) {
-            IssueCommand(cmd);
-            cmd_issued = true;
-
-            if (config_.enable_hbm_dual_cmd) {
-                auto second_cmd = cmd_queue_.GetCommandToIssue();
-                if (second_cmd.IsValid()) {
-                    if (second_cmd.IsReadWrite() != cmd.IsReadWrite()) {
-                        IssueCommand(second_cmd);
-                        simple_stats_.Increment("hbm_dual_cmds");
+                if (config_.enable_hbm_dual_cmd) {
+                    auto second_cmd = cmd_queue_.GetCommandToIssue();
+                    if (second_cmd.IsValid()) {
+                        if (second_cmd.IsReadWrite() != cmd.IsReadWrite()) {
+                            IssueCommand(second_cmd);
+                            simple_stats_.Increment("hbm_dual_cmds");
+                        }
                     }
                 }
             }
+        } else if (!row_operations_.empty() && PimQueuesEmpty()) {
+            cmd_issued = PrepareRowBanks();
+        } else {
+            // TODO if second == 0, issue and set cmd_issue true. else,
+            // decrement by 1.
+            cmd_issued = SchedulePimQueue(rd_w_cmds_, PimSource::WEIGHT) ||
+                         SchedulePimQueue(rd_in_cmds_, PimSource::INPUT) ||
+                         SchedulePimQueue(wr_cmds_, PimSource::OUTPUT);
+            // rd_in_cmds_.clear(); //used in MT
         }
     }
-    else {
-        // TODO if second == 0, issue and set cmd_issue true. else, decrement by 1.
-        cmd_issued = SchedulePimQueue(rd_w_cmds_, false) ||
-                     SchedulePimQueue(rd_in_cmds_, true) ||
-                     SchedulePimQueue(wr_cmds_, false);
-        // rd_in_cmds_.clear(); //used in MT
-    }
-
 
     // power updates pt 1
     for (int i = 0; i < config_.ranks; i++) {
