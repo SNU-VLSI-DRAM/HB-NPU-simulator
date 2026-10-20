@@ -34,8 +34,7 @@ If you use HB-NPU for your research, please cite our [paper](https://ieeexplore.
 Start with [building](#building), then use the
 [Qwen/Mistral quick start](#dense-qwen2mistral-matrix-workloads) or
 [OPT evaluation](#run-the-opt-evaluation). The canonical hardware configuration
-is `configs/HBNPU_8Gb.ini`; do not substitute the historical `_pim.ini` fixture
-when interpreting canonical performance results.
+is `configs/HBNPU_8Gb.ini`.
 
 ## Building and running the simulator
 
