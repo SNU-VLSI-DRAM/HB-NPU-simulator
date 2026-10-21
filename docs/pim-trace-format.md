@@ -12,6 +12,18 @@ Exactly two records are required:
 tile_M, post_delay, mcf, ucf, df
 M, K, N
 ```
+For a matrix multiplication [M × K] × [K × N] → [M × N]:
+- M: output rows—the dimension streamed from DRAM.
+- K: reduction dimension, or dot-product length.
+- N: input vectors processed together, such as batch items or grouped queries.
+- tile_M: maximum streamed M elements processed per compute tile.
+- post_delay: reserved workload field; currently unused by trace generation and simulation.
+Workload dimensions are transformed by mcf and ucf before execution.
+
+multicast factor (mcf) and unicast factor (ucf) control how work is distributed across banks:
+- mcf splits the streamed M dimension across banks.
+- ucf partitions K and packs the corresponding vectors into N: K → K/ucf, N → N×ucf.
+For LH streaming, mcf × ucf = 16. In GQA, ucf represents parallel KV groups, while mcf is the number of banks assigned to each group.
 
 For example, `workloads/OPT-2.7B/decode/createQKV` contains:
 
