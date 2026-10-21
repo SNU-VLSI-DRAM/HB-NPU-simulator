@@ -1,14 +1,14 @@
-#ifndef DRAMSIM3_LEGACY_TILE_SCHEDULER_H
-#define DRAMSIM3_LEGACY_TILE_SCHEDULER_H
+#ifndef DRAMSIM3_TEST_REFERENCE_TILE_SCHEDULE_H
+#define DRAMSIM3_TEST_REFERENCE_TILE_SCHEDULE_H
 
 #include "hbnpu/pim_kernel_context.h"
 
 namespace dramsim3 {
 
 // Selects blocks only: no bank readiness, stage counters, or simulated ticks.
-class LegacyTileScheduler {
+class ReferenceTileSchedule {
    public:
-    LegacyTileScheduler(const PimKernelContext& context, int channels);
+    ReferenceTileSchedule(const PimKernelContext& context, int channels);
     bool NextCompute(PimComputeBlock& block);
     bool NextOutput(PimOutputBlock& block);
     void ProjectProgress(PimExecutionState&, bool compute_exhausted,

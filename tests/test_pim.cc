@@ -1,14 +1,33 @@
+#include "reference_dataflow.h"
 #include "catch.hpp"
 #include "controller.h"
 #include "dram_system.h"
 #include "hbnpu/pim_command_batch.h"
 #include "hbnpu/pim_config.h"
 #include "hbnpu/pim_execution_state.h"
-#include "hbnpu/pim_transaction.h"
 #include "timing.h"
 
 namespace {
 void dummy_pim_callback(uint64_t) {}
+void SubmitTestTile(dramsim3::JedecDRAMSystem& system, bool local, bool more_m = false) {
+    const uint64_t words[] = {
+        0xb711070000000000ULL, (128ULL << 32) | (more_m ? 256 : 64),
+        ((more_m ? 128ULL : 2048ULL) << 32) | 128, 0, 0, 0,
+        local ? 0x80201ULL : 0x10200ULL, 0x0020001000000008ULL,
+        0xb712010000000001ULL, 0,
+        0xb715020000000002ULL, 0, 0,
+        0xb716020000000003ULL, 0, 0
+    };
+    for (auto word : words) REQUIRE(system.AddTransaction(word));
+    if (more_m) {
+        for (uint64_t word : {0xb712010000000004ULL, local ? 2ULL : 128ULL,
+                              0xb715020000000005ULL, 128ULL, 0ULL,
+                              0xb716020000000006ULL, 128ULL, 0ULL})
+            REQUIRE(system.AddTransaction(word));
+    }
+    REQUIRE(system.AddTransaction(more_m ? 0xb714000000000007ULL
+                                         : 0xb714000000000004ULL));
+}
 }
 
 namespace dramsim3 {
@@ -226,8 +245,7 @@ TEST_CASE("Kernel completion waits for issued data through refresh", "[pim][gang
     config.tREFI=300;
     config.tRFC=30;
     JedecDRAMSystem system(config,".",dummy_pim_callback,dummy_pim_callback);
-    for (uint64_t address : {uint64_t(0x2ece),uint64_t(0x200),uint64_t(0x402),uint64_t(0x404),uint64_t(1)})
-        REQUIRE(system.AddTransaction(address));
+    SubmitTestTile(system, true);
     for (int cycle=0; cycle<10000 && !system.turn_off; ++cycle) system.ClockTick();
     REQUIRE(system.turn_off);
     REQUIRE_FALSE(system.execution_.input_pending);
@@ -353,21 +371,20 @@ TEST_CASE("LH reads retain parallel bank IO and two-cycle spacing", "[pim][gh-ti
 TEST_CASE("PIM stage delays use the streaming dataflow clock", "[pim][gh-timing]") {
     using namespace dramsim3;
     Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
+    config.row_lockstep = false;
+    config.gh_read_delay = false;
     JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
                            dummy_pim_callback);
-    uint64_t dataflow = 0x2c0e;
+    bool local = false;
     int expected_out_count = 0;  // max(1, 1 * (1 + 4 + 3) - 14), then decrement
     int expected_in_count = 50;  // 1 * max(128 / 2, 16) - 14
     SECTION("GH streams at one-cycle array period") {}
     SECTION("LH streams at two-cycle array period") {
-        dataflow = 0x2ece;
+        local = true;
         expected_out_count = 1; // 2 * (1 + 4 + 3) - 14, then decrement
         expected_in_count = 18;  // 2 * max(128 / 16, 16) - 14
     }
-    for (uint64_t address : {dataflow, uint64_t(0x200), uint64_t(0x402),
-                             uint64_t(0x804), uint64_t(0x1)}) {
-        REQUIRE(dramsys.AddTransaction(address)); // M=64, K=128, N=256
-    }
+    SubmitTestTile(dramsys, local, true);
     bool started_streaming = false;
     bool completed_tile = false;
     for (int cycle = 0; cycle < 2000; ++cycle) {
@@ -469,62 +486,12 @@ TEST_CASE("PIM command batch preserves order and release pairing", "[pim]") {
     REQUIRE(batch.operations[1].second.release_cycle == 11);
 }
 
-TEST_CASE("PIM configuration resets execution progress", "[pim]") {
+TEST_CASE("Old matrix launch transactions are rejected", "[pim]") {
     using namespace dramsim3;
     Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
-    JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
-                            dummy_pim_callback);
-    dramsys.execution_.m = 17;
-    dramsys.execution_.m_it = 12;
-    dramsys.execution_.input_pending = true;
-    dramsys.execution_.out_cnt = 20;
-    REQUIRE(dramsys.AddTransaction(0x2c0e));
-    dramsys.ClockTick();
-    REQUIRE(dramsys.pim_trans_queue_.empty());
-    REQUIRE(dramsys.execution_.m == 0);
-    REQUIRE(dramsys.execution_.m_it == 0);
-    REQUIRE_FALSE(dramsys.execution_.input_pending);
-    REQUIRE(dramsys.execution_.out_cnt == -1);
-}
-
-TEST_CASE("PIM launch before dataflow configuration stays queued", "[pim]") {
-    using namespace dramsim3;
-    Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
-    JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
-                            dummy_pim_callback);
-
-    // Dimensions alone must not bypass the initialization guard.
-    dramsys.execution_.m = 64;
-    dramsys.execution_.k = 128;
-    dramsys.execution_.n = 128;
-    REQUIRE(dramsys.AddTransaction(0x1));
-    dramsys.ClockTick();
-
-    REQUIRE_FALSE(dramsys.execution_.in_pim);
-    REQUIRE(dramsys.pim_trans_queue_.size() == 1);
-    REQUIRE(dramsys.pim_trans_queue_.front().addr == 0x1);
-}
-
-TEST_CASE("PIM launch requires all three dimensions", "[pim]") {
-    using namespace dramsim3;
-    Config config("configs/HBM2_8Gb_x128_pim.ini", ".");
-    JedecDRAMSystem dramsys(config, ".", dummy_pim_callback,
-                            dummy_pim_callback);
-
-    REQUIRE(dramsys.AddTransaction(0x2c0e));
-    dramsys.ClockTick();
-    dramsys.execution_.m = 64;
-    dramsys.execution_.k = 128;
-    dramsys.execution_.n = 128;
-    bool ready = false;
-    SECTION("missing M") { dramsys.execution_.m = 0; }
-    SECTION("missing K") { dramsys.execution_.k = 0; }
-    SECTION("missing N") { dramsys.execution_.n = 0; }
-    SECTION("all configured") { ready = true; }
-    REQUIRE(dramsys.AddTransaction(0x1));
-    dramsys.ClockTick();
-    REQUIRE(dramsys.execution_.in_pim == ready);
-    REQUIRE(dramsys.pim_trans_queue_.empty() == ready);
+    JedecDRAMSystem system(config, ".", dummy_pim_callback, dummy_pim_callback);
+    REQUIRE(system.AddTransaction(0x2c0e));
+    REQUIRE_THROWS_AS(system.ClockTick(), std::invalid_argument);
 }
 
 TEST_CASE("PIM dataflow config preserves defaults and decoded values", "[pim]") {
@@ -537,7 +504,7 @@ TEST_CASE("PIM dataflow config preserves defaults and decoded values", "[pim]") 
     REQUIRE(config.df == -1);
     REQUIRE(config.m_tile_size == 0);
 
-    config.Load(PimTransactionDecoder::Decode(0x2ece));
+    LoadReferenceDataflow(config, PimTransactionDecoder::Decode(0x2ece));
     REQUIRE(config.configured);
     REQUIRE(config.mcf == 2);
     REQUIRE(config.ucf == 8);

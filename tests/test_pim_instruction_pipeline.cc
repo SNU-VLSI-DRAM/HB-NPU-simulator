@@ -119,7 +119,6 @@ TEST_CASE("Split GEMM waits for resident work on channel three through refresh",
     char temp[] = "/tmp/hbnpu-resident-pipeline-XXXXXX";
     REQUIRE(mkdtemp(temp) != nullptr);
     Config hw("configs/HBM2_8Gb_x128_pim.ini", temp);
-    hw.tile_instructions = true;
     hw.instruction_capacity = 1;
     hw.tREFI = 1000;
     auto callback = [](uint64_t) {};
@@ -166,9 +165,7 @@ TEST_CASE("Instruction drain waits for input pending only in channel three",
     char temp[] = "/tmp/hbnpu-pipeline-XXXXXX";
     REQUIRE(mkdtemp(temp) != nullptr);
     Config hw("configs/HBM2_8Gb_x128_pim.ini", temp);
-    REQUIRE_FALSE(hw.tile_instructions);
     REQUIRE(hw.instruction_capacity == 16);
-    hw.tile_instructions = true;
     hw.instruction_capacity = 1;
     bool require_refresh = false;
     SECTION("ordinary delayed input") {}
@@ -209,5 +206,4 @@ TEST_CASE("Instruction drain waits for input pending only in channel three",
     for (int tick = 2000; tick < 10000 && !system.turn_off; ++tick)
         system.ClockTick();
     REQUIRE(system.turn_off);
-    REQUIRE(system.pim_trans_queue_.empty());
 }

@@ -27,7 +27,7 @@ void Kind(const PimInstructionPacket& p, PimInstructionOpcode kind) {
 PimInstructionHeader PimInstructionCodec::DecodeHeader(uint64_t word) {
     PimInstructionHeader h;
     h.sequence = static_cast<uint32_t>(word);
-    Check((word >> 56) == 0xb7, h.sequence, "magic");
+    Check((word >> 56) == 0xb7, h.sequence, "magic: expected tile instruction packet; regenerate old traces with gen_LLM_trace.py or gen_tile_trace.py");
     Check(((word >> 52) & 15) == 1, h.sequence, "version");
     const unsigned op = (word >> 48) & 15;
     Check(op >= 1 && op <= 6, h.sequence, "opcode");

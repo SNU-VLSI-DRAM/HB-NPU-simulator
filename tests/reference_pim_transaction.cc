@@ -1,4 +1,4 @@
-#include "hbnpu/pim_transaction.h"
+#include "reference_pim_transaction.h"
 
 namespace dramsim3 {
 namespace {

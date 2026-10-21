@@ -1,8 +1,6 @@
 #ifndef __PIM_CONFIG_H
 #define __PIM_CONFIG_H
 
-#include "hbnpu/pim_transaction.h"
-
 namespace dramsim3 {
 
 struct PimDataflowConfig {
@@ -15,16 +13,6 @@ struct PimDataflowConfig {
     int stride = 0;
     int kernel_size = 0;
 
-    void Load(const DecodedPimTransaction& decoded) {
-        mcf = decoded.mcf;
-        ucf = decoded.ucf;
-        df = decoded.df;
-        mc = mcf * ucf;
-        m_tile_size = decoded.m_tile_size;
-        kernel_size = decoded.kernel_size;
-        stride = decoded.stride;
-        configured = true;
-    }
 };
 
 }  // namespace dramsim3

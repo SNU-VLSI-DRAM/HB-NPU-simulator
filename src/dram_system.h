@@ -13,7 +13,6 @@
 #include "hbnpu/pim_config.h"
 #include "hbnpu/pim_execution_state.h"
 #include "hbnpu/pim_tile_executor.h"
-#include "hbnpu/legacy_tile_scheduler.h"
 #include "hbnpu/pim_instruction_sequencer.h"
 #include "hbnpu/pim_row_scheduler.h"
 #include "timing.h"
@@ -82,25 +81,19 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     bool AddTransaction(uint64_t hex_addr) override;
     bool AddTransaction(uint64_t hex_addr, bool is_write) override;
     void ClockTick() override;
-    Command GetReadyCommandPIM(Transaction trans, CommandType type);
     void PrintStats() override;
     void RecordPimAdmissionStall() override {
-        if (config_.tile_instructions) ++cpu_backpressure_cycles_;
+        if (instruction_buffer_) ++cpu_backpressure_cycles_;
     }
 
    private:
     void ReturnCompletedTransactions();
     bool CheckRefreshWindow();
-    void ProcessPimTransaction();
     bool PimCommandsBlockedByRefresh() const;
-    void SchedulePimCommands(bool wait_refresh, bool is_in_ref);
     void DispatchCommands(const PimCommandBatch& batch);
     bool PendingPimSource(PimSource source) const;
     uint64_t PimReadReadyCycle(PimSource source) const;
     void TickControllers();
-    PimDataflowConfig pim_config_;
-    std::unique_ptr<PimTileExecutor> tile_executor_;
-    std::unique_ptr<LegacyTileScheduler> tile_scheduler_;
     std::unique_ptr<PimInstructionBuffer> instruction_buffer_;
     std::unique_ptr<PimInstructionSequencer> instruction_sequencer_;
     std::unique_ptr<PimRowScheduler> row_scheduler_;
@@ -110,9 +103,6 @@ class JedecDRAMSystem : public BaseDRAMSystem {
     PimExecutionState execution_;
 
 
-    std::vector<std::vector<bool>> bank_occupancy_;
-    std::vector<Transaction> pim_trans_queue_;
-    uint64_t pim_trans_queue_depth_ = 32; //TODO
 };
 
 // Model a memorysystem with an infinite bandwidth and a fixed latency (possibly

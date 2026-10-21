@@ -1,7 +1,8 @@
+#include "reference_dataflow.h"
 #include <stdexcept>
 #include <algorithm>
 #include "catch.hpp"
-#include "hbnpu/legacy_tile_scheduler.h"
+#include "reference_tile_schedule.h"
 #include "hbnpu/pim_tile_executor.h"
 
 using namespace dramsim3;
@@ -11,7 +12,7 @@ namespace dramsim3 {
 class PimTileExecutorTestPeer {
  public:
     static void Prime(PimTileExecutor& executor, const PimExecutionState& state) {
-        LegacyTileScheduler scheduler(executor.context_, executor.config_.channels);
+        ReferenceTileSchedule scheduler(executor.context_, executor.config_.channels);
         PimComputeBlock compute;
         PimOutputBlock output;
         scheduler.NextCompute(compute);
@@ -28,7 +29,7 @@ PimKernelContext MakeContext(int m, int n, int k, int df) {
     PimExecutionState state;
     state.m = m; state.n = n; state.k = k;
     PimDataflowConfig dataflow;
-    dataflow.Load(PimTransactionDecoder::Decode(df == 0 ? 0x2c0e : 0x2ece));
+    LoadReferenceDataflow(dataflow, PimTransactionDecoder::Decode(df == 0 ? 0x2c0e : 0x2ece));
     return PimKernelContext::Capture(dataflow, state);
 }
 }
@@ -36,7 +37,7 @@ PimKernelContext MakeContext(int m, int n, int k, int df) {
 TEST_CASE("Compute descriptors traverse K then N then M", "[pim][tile]") {
     auto c = MakeContext(65, 256, 256, 0);
     c.dataflow.m_tile_size = 64;
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimComputeBlock block;
     int count = 0;
     for (int m : {0, 64}) for (int n : {0, 128}) for (int k : {0, 128}) {
@@ -58,7 +59,7 @@ TEST_CASE("Compute descriptors traverse K then N then M", "[pim][tile]") {
 
 TEST_CASE("Descriptor tails preserve launch geometry", "[pim][tile]") {
     auto c = MakeContext(3, 129, 130, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimComputeBlock block;
     REQUIRE(schedule.NextCompute(block));
     REQUIRE(block.k_extent == 128);
@@ -78,7 +79,7 @@ TEST_CASE("Output descriptors have independent dataflow-specific traversal", "[p
     auto c = MakeContext(65, 256, 256, 0);
     c.dataflow.m_tile_size = 64;
     SECTION("GH output traverses N then M") {
-        LegacyTileScheduler schedule(c, 8);
+        ReferenceTileSchedule schedule(c, 8);
         PimOutputBlock out;
         PimComputeBlock block;
         int count = 0;
@@ -97,7 +98,7 @@ TEST_CASE("Output descriptors have independent dataflow-specific traversal", "[p
     SECTION("LH output uses transformed M and fixed N") {
         c = MakeContext(256, 256, 256, 1);
         c.dataflow.m_tile_size = 128;
-        LegacyTileScheduler schedule(c, 8);
+        ReferenceTileSchedule schedule(c, 8);
         PimOutputBlock out;
         for (int m : {0, 2}) {
             REQUIRE(schedule.NextOutput(out));
@@ -115,9 +116,9 @@ TEST_CASE("Captured context and scheduler do not alias launch staging", "[pim][t
     state.m = 64; state.n = 128; state.k = 128;
     state.base_row_in = 17; state.base_row_weight = 31; state.base_row_output = 49;
     PimDataflowConfig dataflow;
-    dataflow.Load(PimTransactionDecoder::Decode(0x2c0e));
+    LoadReferenceDataflow(dataflow, PimTransactionDecoder::Decode(0x2c0e));
     auto c = PimKernelContext::Capture(dataflow, state);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     state.m = 1; dataflow.mc = 1; c.m = 2;
     PimComputeBlock block;
     REQUIRE(schedule.NextCompute(block));
@@ -140,11 +141,14 @@ TEST_CASE("Invalid internal kernel geometry is rejected", "[pim][tile]") {
     SECTION("mc") { c.dataflow.mc = 0; }
     SECTION("dataflow") { c.dataflow.df = 2; }
     SECTION("LH output tile") { c.dataflow.df = 1; c.dataflow.m_tile_size = 64; }
-    REQUIRE_THROWS_AS(LegacyTileScheduler(c, channels), std::invalid_argument);
+    REQUIRE_THROWS_AS(ReferenceTileSchedule(c, channels), std::invalid_argument);
 }
 
 TEST_CASE("Executor retires input vectors before starting same-tick output delay", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     int df = 0, expected = 0;
     SECTION("GH") {}
     SECTION("LH") { df = 1; expected = 1; }
@@ -170,6 +174,9 @@ TEST_CASE("Executor retires input vectors before starting same-tick output delay
 TEST_CASE("GH arrival deadlines advance through refresh without reissuing inputs",
           "[pim][gh-arrival]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     hw.gh_read_delay = true;
     PimTileExecutor executor(hw, MakeContext(64, 256, 128, 0));
     PimExecutionState state;
@@ -210,6 +217,9 @@ TEST_CASE("GH arrival deadlines advance through refresh without reissuing inputs
 
 TEST_CASE("Executor distinguishes pending data and refresh from data retirement", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     PimTileExecutor executor(hardware, MakeContext(64, 256, 128, 0));
     PimExecutionState state;
     state.m = 64; state.n = 256; state.k = 128;
@@ -231,6 +241,9 @@ TEST_CASE("Executor distinguishes pending data and refresh from data retirement"
 
 TEST_CASE("Output uses entry phase and releases counter exactly once", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto context = MakeContext(64, 256, 128, 0);
     PimTileExecutor executor(hardware, context);
     PimExecutionState state;
@@ -252,8 +265,11 @@ TEST_CASE("Output uses entry phase and releases counter exactly once", "[pim][ti
 
 TEST_CASE("One supplied block cannot start the next matrix block", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto c = MakeContext(3, 128, 256, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimTileExecutor executor(hardware, c);
     PimDescriptorSource source;
     int requests = 0;
@@ -274,8 +290,11 @@ TEST_CASE("One supplied block cannot start the next matrix block", "[pim][tile]"
 
 TEST_CASE("Active descriptors are owned and cannot be replaced", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto c = MakeContext(64, 256, 128, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimTileExecutor executor(hardware, c);
     PimComputeBlock block;
     PimOutputBlock output;
@@ -294,8 +313,11 @@ TEST_CASE("Active descriptors are owned and cannot be replaced", "[pim][tile]") 
 
 TEST_CASE("Missing output descriptor stalls completion without losing availability", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto c = MakeContext(3, 128, 128, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimTileExecutor executor(hardware, c);
     PimDescriptorSource source;
     source.next_compute = [&](PimComputeBlock& b) { return schedule.NextCompute(b); };
@@ -320,7 +342,7 @@ TEST_CASE("Missing output descriptor stalls completion without losing availabili
 TEST_CASE("Legacy diagnostics project exhausted cursors without advancing selection", "[pim][tile]") {
     auto c = MakeContext(65, 256, 256, 0);
     c.dataflow.m_tile_size = 64;
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimComputeBlock b;
     PimOutputBlock o;
     PimExecutionState state;
@@ -346,8 +368,11 @@ TEST_CASE("Legacy diagnostics project exhausted cursors without advancing select
 
 TEST_CASE("Executor rejects malformed block geometry without taking ownership", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto c = MakeContext(64, 256, 256, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimTileExecutor executor(hardware, c);
     PimComputeBlock b;
     REQUIRE(schedule.NextCompute(b));
@@ -363,8 +388,11 @@ TEST_CASE("Executor rejects malformed block geometry without taking ownership", 
 
 TEST_CASE("Executor rejects malformed output geometry without taking ownership", "[pim][tile]") {
     Config hardware("configs/HBM2_8Gb_x128_pim.ini", ".");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hardware.row_lockstep = false;
+    hardware.gh_read_delay = false;
     auto c = MakeContext(64, 256, 128, 0);
-    LegacyTileScheduler schedule(c, 8);
+    ReferenceTileSchedule schedule(c, 8);
     PimTileExecutor executor(hardware, c);
     PimOutputBlock b;
     REQUIRE(schedule.NextOutput(b));

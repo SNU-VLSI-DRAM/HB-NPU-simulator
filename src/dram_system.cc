@@ -1,5 +1,4 @@
 #include "dram_system.h"
-#include "hbnpu/pim_transaction.h"
 #include <assert.h>
 #include <cmath>
 #include "json.hpp"
@@ -99,7 +98,7 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
                                  std::function<void(uint64_t)> read_callback,
                                  std::function<void(uint64_t)> write_callback)
     : BaseDRAMSystem(config, output_dir, read_callback, write_callback) {
-    if (config_.tile_instructions) {
+    if (config_.IsHBM()) {
         instruction_buffer_.reset(new PimInstructionBuffer(config_.instruction_capacity));
         instruction_sequencer_.reset(new PimInstructionSequencer(config_));
     }
@@ -120,13 +119,7 @@ JedecDRAMSystem::JedecDRAMSystem(Config &config, const std::string &output_dir,
 
     if (config_.row_lockstep)
         row_scheduler_.reset(new PimRowScheduler(config_, ctrls_));
-    int banks =  config_.ranks * config_.bankgroups * config_.banks_per_group;
-    // std::cout<<"rank: "<<config_.ranks<<" bgs: "<<config_.bankgroups<<" bpg: "<<config_.banks_per_group<<std::endl;
-    for (auto i = 0; i < config_.channels; i++) {
-        auto chan_occupancy =
-            std::vector<bool>(banks, false);
-        bank_occupancy_.push_back(chan_occupancy);
-    }
+
 }
 
 JedecDRAMSystem::~JedecDRAMSystem() {
@@ -137,32 +130,15 @@ JedecDRAMSystem::~JedecDRAMSystem() {
 
 
 bool JedecDRAMSystem::WillAcceptTransaction() const {
-    if (instruction_buffer_) return instruction_buffer_->CanAcceptWord();
-    return pim_trans_queue_.size() < pim_trans_queue_depth_;
+    return instruction_buffer_ && instruction_buffer_->CanAcceptWord();
 }
 
-bool JedecDRAMSystem::AddTransaction(uint64_t hex_addr) {
-    if (instruction_buffer_) {
-        bool accepted=instruction_buffer_->PushWord(hex_addr);
-        if (accepted) last_req_clk_=clk_;
-        return accepted;
-    }
-// Record trace - Record address trace for debugging or other purposes
-#ifdef ADDR_TRACE
-    address_trace_ << std::hex << hex_addr << std::dec << " "
-                   << "PIM " << clk_ << std::endl;
-#endif
-
-    bool ok = WillAcceptTransaction();
-
-    assert(ok);
-    if (ok) {
-        Transaction trans = Transaction(hex_addr);
-        pim_trans_queue_.push_back(trans);
-
-    }
-    last_req_clk_ = clk_;
-    return ok;
+bool JedecDRAMSystem::AddTransaction(uint64_t word) {
+    if (!instruction_buffer_)
+        throw std::invalid_argument("HB-NPU instructions require HBM");
+    const bool accepted = instruction_buffer_->PushWord(word);
+    if (accepted) last_req_clk_ = clk_;
+    return accepted;
 }
 
 bool JedecDRAMSystem::WillAcceptTransaction(uint64_t hex_addr,
@@ -211,10 +187,6 @@ void JedecDRAMSystem::ClockTick() {
         DispatchCommands(result.batch);
         if (result.row.vectors) row_scheduler_->Submit(std::move(result.row), clk_);
         turn_off=instruction_sequencer_->Complete();
-    } else {
-        ProcessPimTransaction();
-        bool is_in_ref = PimCommandsBlockedByRefresh();
-        SchedulePimCommands(wait_refresh, is_in_ref);
     }
     TickControllers();
     clk_++;
@@ -249,7 +221,7 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
     bool wait_refresh = false;
     for (size_t i=0; i<ctrls_.size(); i++) {
         if (ctrls_[i]->pim_refresh_coming() &&
-            (pim_config_.configured || (instruction_sequencer_ && execution_.in_pim))) {
+            (instruction_sequencer_ && execution_.in_pim)) {
             wait_refresh = true;
             // std::cout<<clk_ << "\tWait Refresh\n";
         }
@@ -257,71 +229,6 @@ bool JedecDRAMSystem::CheckRefreshWindow() {
 
 
     return wait_refresh;
-}
-
-void JedecDRAMSystem::ProcessPimTransaction() {
-    //*** Custom Transaction Queue Manager ***//
-    // Pop a PIM transaction if the queue is not empty
-    if (!pim_trans_queue_.empty()) {
-        auto it = pim_trans_queue_.begin();
-        DecodedPimTransaction decoded =
-            PimTransactionDecoder::Decode(pim_trans_queue_.front().addr);
-
-        switch (decoded.kind) {
-        case PimTransactionKind::START_COMPUTATION: {
-            if (pim_config_.configured && execution_.m != 0 &&
-                execution_.n != 0 && execution_.k != 0) {
-                execution_.in_pim = true;
-                tile_executor_.reset(new PimTileExecutor(
-                    config_, PimKernelContext::Capture(pim_config_, execution_)));
-                tile_scheduler_.reset(new LegacyTileScheduler(
-                    PimKernelContext::Capture(pim_config_, execution_), config_.channels));
-                pim_trans_queue_.erase(it);
-            }
-            for (size_t i=0; i<ctrls_.size(); i++) {
-                ctrls_[i]->in_pim = true;
-            }
-
-            break;
-        }
-        case PimTransactionKind::LOAD_DATAFLOW_CONFIG: {
-            pim_config_.Load(decoded);
-            execution_ = PimExecutionState();
-            tile_executor_.reset();
-            tile_scheduler_.reset();
-
-            pim_trans_queue_.erase(it);
-            break;
-        }
-        case PimTransactionKind::LOAD_WORKLOAD_CONFIG: {
-            if (!pim_config_.configured) break;
-            PimExecutionState& state = execution_;
-            switch(decoded.load_type) {
-                case 0: // M, weight
-                    state.base_row_weight = decoded.base_row;
-                    state.m = decoded.dim_value;
-                    break;
-                case 1: // K, output
-                    state.base_row_output = decoded.base_row;
-                    // std::cout<<base_row<<std::endl;
-                    state.k = decoded.dim_value;
-                    break;
-                case 2: // N, input
-                    state.base_row_in = decoded.base_row;
-                    state.n = decoded.dim_value;
-                    break;
-                default:
-                    std::cerr << "Invalid load type!"
-                              << std::endl;
-                    AbruptExit(__FILE__, __LINE__);
-                    break;
-            }
-            pim_trans_queue_.erase(it);
-            break;
-        }
-        }
-    }
-
 }
 
 bool JedecDRAMSystem::PimCommandsBlockedByRefresh() const {
@@ -345,35 +252,6 @@ uint64_t JedecDRAMSystem::PimReadReadyCycle(PimSource source) const {
     for (const auto* controller : ctrls_)
         ready = std::max(ready, controller->PimReadReadyCycle(source));
     return ready;
-}
-
-void JedecDRAMSystem::SchedulePimCommands(bool wait_refresh, bool is_in_ref) {
-    if (!pim_config_.configured || !execution_.in_pim ||
-        (is_in_ref && !config_.gh_read_delay)) return;
-    PimTickFeedback feedback;
-    feedback.wait_refresh = wait_refresh;
-    feedback.in_refresh = is_in_ref;
-    feedback.weight_pending = PendingPimSource(PimSource::WEIGHT);
-    feedback.input_pending = PendingPimSource(PimSource::INPUT);
-    feedback.output_pending = PendingPimSource(PimSource::OUTPUT);
-    feedback.weight_ready_cycle = PimReadReadyCycle(PimSource::WEIGHT);
-    feedback.input_ready_cycle = PimReadReadyCycle(PimSource::INPUT);
-    PimDescriptorSource source;
-    source.next_compute = [this](PimComputeBlock& block) {
-        return tile_scheduler_->NextCompute(block);
-    };
-    source.next_output = [this](PimOutputBlock& block) {
-        return tile_scheduler_->NextOutput(block);
-    };
-    auto result = tile_executor_->Tick(clk_, feedback, source);
-    execution_ = tile_executor_->Snapshot();
-    tile_scheduler_->ProjectProgress(execution_, result.compute_exhausted, result.output_exhausted);
-    if (result.computation_finished)
-        std::cout << clk_ << " End of Computation 0" << std::endl;
-    if (result.finished)
-        std::cout << clk_ << " Output Exhausted: Array0. Turn off PIM mode.\n";
-    DispatchCommands(result.batch);
-    if (result.finished) turn_off = true;
 }
 
 void JedecDRAMSystem::DispatchCommands(const PimCommandBatch& batch) {
@@ -429,40 +307,6 @@ void JedecDRAMSystem::TickControllers() {
     }
 
 }
-
-Command JedecDRAMSystem::GetReadyCommandPIM(Transaction trans, CommandType type) {
-    bool first = true;
-    bool sameornot = false;
-    Command ready_cmd = Command();
-    if (trans.targetChans.empty() || trans.targetBanks.empty()) std::cout<<"empty target Chans, Banks\t"<<trans<<'\n';
-    for (auto& itC : trans.targetChans) {
-        // We do not need to add more loops here since only these two dimensions are orthogonal to each other
-        for (auto& itB : trans.targetBanks) {
-            // TODO how to set rank, bankgroup, and column address (device width)?
-            Address addr = Address((int) itC, 0, 0, (int) itB, (int) trans.row_addr,  (int) trans.col_num);
-            Command cmd = Command(type, addr, trans.addr);
-            std::cout<<clk_<<"\tWant To issue: " << cmd << '\n';
-            ready_cmd = ctrls_[itC]->GetReadyCommand(cmd, clk_);
-            if (first) {
-                first = false;
-                sameornot = cmd.cmd_type == ready_cmd.cmd_type;
-            }
-            else {
-                if (sameornot != (cmd.cmd_type == ready_cmd.cmd_type)) {
-                    std::cout <<clk_<< "\tSame or not fail:\n" << cmd << '\n' << ready_cmd << '\n';
-                    return Command();
-                }
-            }
-            if (!ready_cmd.IsValid() || bank_occupancy_[itC][itB]) {
-                std::cout << clk_<<"\tGetReadyCommandPIM fail(" << ready_cmd << ") - Bank occupancy " << itC << itB << ": " << bank_occupancy_[itC][itB] << '\n';
-                return Command();
-            }
-        }
-    }
-    return ready_cmd;
-}
-
-
 
 IdealDRAMSystem::IdealDRAMSystem(Config &config, const std::string &output_dir,
                                  std::function<void(uint64_t)> read_callback,

@@ -1,18 +1,39 @@
 import os
 import argparse
 import math
+import subprocess
+import sys
+import tempfile
+from contextlib import contextmanager
+from pathlib import Path
 import openpyxl
 import json
 from communication_cost import*
 
 parser = argparse.ArgumentParser()
-parser.add_argument("-p", default="traces", help="trace path")
+parser.add_argument("-p", default=None, help="existing instruction trace root; otherwise generate fresh traces")
 parser.add_argument("-n", default="Sheet", help="sheet name")
-parser.add_argument("-m", default="OPT_2.7B", help="Model to run")
+parser.add_argument("-m", default="OPT-2.7B", help="Model to run")
 parser.add_argument("-i", default=1024, help="input tokens")
 parser.add_argument("-o", default=128, help="output tokens")
 parser.add_argument("-b", default=64, help="batch size")
 parser.add_argument("-s", default="configs/HBNPU_8Gb.ini", help="specification of DRAM")
+
+
+@contextmanager
+def simulate_kernel(trace, spec, log, *, binary="./build/dramsim3main", cycles=10000000):
+    """Require END completion; never read stale output from a previous kernel."""
+    with tempfile.TemporaryDirectory(prefix="hbnpu-opt-kernel-") as output:
+        with open(log, "a") as stream:
+            stream.write(str(trace) + "\n")
+            stream.flush()
+            subprocess.run([str(binary), str(spec), "-c", str(cycles),
+                            "-t", str(trace), "-o", output],
+                           stdout=stream, stderr=subprocess.STDOUT, check=True)
+        metrics = json.loads((Path(output) / "hbnpu_instruction.json").read_text())
+        if not metrics["end_completed"]:
+            raise RuntimeError("instruction program did not complete: " + str(trace))
+        yield json.loads((Path(output) / "dramsim3.json").read_text())
 
 def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
 
@@ -22,7 +43,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     print("Trace file checking..")
     workload = "_".join([model, str(in_tokens), str(out_tokens), str(batch_size)])
     print("Workload: " + workload)
-    trace_folder = "traces/" +  workload
+    trace_folder = os.path.join(path, workload)
     if not os.path.exists(trace_folder):
         raise Exception("Traces do not exist! Generate traces first.")
 
@@ -68,11 +89,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
     flist = sorted(os.listdir(prompt_folder))
     for f in flist:
 
-        os.system("echo " + f + " >> logs/" + workload + "_prompt.log")
-        os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + prompt_folder + f  + " >> logs/" + workload + "_prompt.log")
-
-        with open('dramsim3.json') as df:
-            json_object = json.load(df)
+        with simulate_kernel(prompt_folder + f, spec, "logs/" + workload + "_prompt.log") as json_object:
             cycles = json_object['0']['num_cycles']
             energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])
             if cycles == 10000000:
@@ -113,10 +130,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
         if os.path.isdir(decode_folder + f):
             for ff in os.listdir(decode_folder + f):
 
-                os.system("echo " + ff + " >> logs/" + workload + "_decode.log")
-                os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + decode_folder + f  + '/' + ff  + " >> logs/" + workload + "_decode.log")
-                with open('dramsim3.json') as df:
-                    json_object = json.load(df)
+                with simulate_kernel(decode_folder + f + "/" + ff, spec, "logs/" + workload + "_decode.log") as json_object:
                     cycles = json_object['0']['num_cycles']*int(n_layers)
                     energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])*int(n_layers)
                     if cycles == 10000000:
@@ -141,12 +155,7 @@ def run(path, name, model, in_tokens, out_tokens, batch_size, spec):
 
         else:
 
-            os.system("echo " + f + " >> logs/" + workload + "_decode.log")
-            os.system("./build/dramsim3main " + spec + " -c 10000000 -t " + decode_folder + f + " >> logs/" + workload + "_decode.log")
-
-
-            with open('dramsim3.json') as df:
-                json_object = json.load(df)
+            with simulate_kernel(decode_folder + f, spec, "logs/" + workload + "_decode.log") as json_object:
                 cycles = json_object['0']['num_cycles']*int(n_layers)
                 energy = sum([json_object[str(ch)]['total_energy'] for ch in range(0,8)])*int(n_layers)
                 if cycles == 10000000:
@@ -209,4 +218,14 @@ def vector_process(n_layers, d_model, n_heads, d_head, TP, PP, in_tokens, out_to
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    run(args.p, args.n, args.m, int(args.i), int(args.o), int(args.b), args.s)
+    if args.p is not None:
+        run(args.p, args.n, args.m, int(args.i), int(args.o), int(args.b), args.s)
+    else:
+        # Generate current instruction traces without overwriting supplied paper traces.
+        with tempfile.TemporaryDirectory(prefix="hbnpu-opt-") as trace_root:
+            subprocess.run([
+                sys.executable, str(Path(__file__).with_name("gen_LLM_trace.py")),
+                "-p", trace_root, "-m", args.m, "-i", str(args.i),
+                "-o", str(args.o), "-b", str(args.b), "-s", args.s,
+            ], check=True)
+            run(trace_root, args.n, args.m, int(args.i), int(args.o), int(args.b), args.s)

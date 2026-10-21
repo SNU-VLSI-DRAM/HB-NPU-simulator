@@ -39,8 +39,6 @@ add_library(dramsim3 SHARED
     src/simple_stats.cc
     src/timing.cc
     src/memory_system.cc
-    src/hbnpu/pim_transaction.cc
-    src/hbnpu/legacy_tile_scheduler.cc
     src/hbnpu/pim_tile_executor.cc
     src/hbnpu/pim_row_operation.cc
     src/hbnpu/pim_row_scheduler.cc
@@ -116,6 +114,8 @@ add_executable(dramsim3test
     tests/test_pim.cc
     tests/test_pim_operations.cc
     tests/test_pim_tiles.cc
+    tests/reference_tile_schedule.cc
+    tests/reference_pim_transaction.cc
     tests/test_pim_instructions.cc
     tests/test_pim_instruction_buffer.cc
     tests/test_pim_instruction_sequencer.cc
@@ -152,6 +152,12 @@ set_tests_properties(hbnpu_gqa_workloads hbnpu_gqa_cli hbnpu_gqa_execution PROPE
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     LABELS "quick"
 )
+add_test(NAME hbnpu_opt_instruction_generation
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_opt_instruction_generation.py)
+add_test(NAME hbnpu_opt_evaluation
+    COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/regression/test_opt_evaluation.py
+            $<TARGET_FILE:dramsim3main>)
+set_tests_properties(hbnpu_opt_evaluation PROPERTIES LABELS "long")
 add_test(NAME hbnpu_instruction_translation
     COMMAND ${PYTHON_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_instruction_translation.py)
 add_test(NAME hbnpu_instruction_comparison
@@ -191,7 +197,7 @@ set_tests_properties(hbnpu_regression_runner_unit PROPERTIES
 add_test(
     NAME hbnpu_quick_regression
     COMMAND ${PYTHON_EXECUTABLE}
-            ${PROJECT_SOURCE_DIR}/tests/regression/run_regression.py
+            ${PROJECT_SOURCE_DIR}/tests/regression/run_tile_regression.py
             --binary $<TARGET_FILE:dramsim3main>
             --suite quick
 )
@@ -212,7 +218,7 @@ set_tests_properties(hbnpu_binary_comparison_unit PROPERTIES
 add_test(
     NAME hbnpu_opt27b_end_to_end
     COMMAND ${PYTHON_EXECUTABLE}
-            ${PROJECT_SOURCE_DIR}/tests/regression/run_regression.py
+            ${PROJECT_SOURCE_DIR}/tests/regression/run_tile_regression.py
             --binary $<TARGET_FILE:dramsim3main>
             --suite opt27b
 )

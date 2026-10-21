@@ -67,6 +67,9 @@ std::vector<uint64_t> SplitProgram(bool multi = false) {
 TEST_CASE("Resident load alone never starts streamed GEMM",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     PimInstructionBuffer buffer(1);
     PimInstructionSequencer sequencer(hw);
     auto words = Program();
@@ -105,6 +108,9 @@ TEST_CASE("Resident load alone never starts streamed GEMM",
 TEST_CASE("Split pairs preserve group order under sparse upload and refresh",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     for (int period : {1, 100}) {
         PimInstructionBuffer buffer(1);
         PimInstructionSequencer sequencer(hw);
@@ -130,6 +136,9 @@ TEST_CASE("Split pairs preserve group order under sparse upload and refresh",
 TEST_CASE("Split pair violations fail even while the resident load is pending",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     auto words = SplitProgram();
     SECTION("GEMM without load") { words[10] = 0xb716020000000002ULL; }
     SECTION("duplicate load") { words[13] = 0xb715020000000003ULL; }
@@ -158,6 +167,9 @@ TEST_CASE("Split pair violations fail even while the resident load is pending",
 TEST_CASE("Split GEMM dispatches during resident load but waits for readiness",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     PimInstructionBuffer buffer(1);
     PimInstructionSequencer sequencer(hw);
     auto words = Program();
@@ -194,6 +206,9 @@ TEST_CASE("Split GEMM dispatches during resident load but waits for readiness",
 TEST_CASE("Fused tiles can replace alternating complete load GEMM pairs",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     const auto split = SplitProgram(true);
     std::vector<uint64_t> mixed;
     uint32_t sequence = 0;
@@ -226,6 +241,9 @@ TEST_CASE("Fused tiles can replace alternating complete load GEMM pairs",
 TEST_CASE("STORE dispatch does not block its required compute",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     PimInstructionBuffer buffer(1);
     PimInstructionSequencer sequencer(hw);
     auto words = Program();
@@ -246,6 +264,9 @@ TEST_CASE("STORE dispatch does not block its required compute",
 TEST_CASE("Capacity one and sparse uploads complete all explicit groups",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     for (int period : {1, 100}) {
         PimInstructionBuffer buffer(1);
         PimInstructionSequencer sequencer(hw);
@@ -263,6 +284,9 @@ TEST_CASE("Capacity one and sparse uploads complete all explicit groups",
 TEST_CASE("Backend drain without END cannot complete",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     PimInstructionBuffer buffer(16);
     PimInstructionSequencer sequencer(hw);
     Run(Program(false), buffer, sequencer);
@@ -273,6 +297,9 @@ TEST_CASE("Backend drain without END cannot complete",
 TEST_CASE("Illegal programs fail before resource stalls hide them",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     auto words = Program();
     SECTION("missing CONFIG") { words = {0xb714000000000000ULL}; }
     SECTION("early END") {
@@ -298,6 +325,9 @@ TEST_CASE("Illegal programs fail before resource stalls hide them",
 TEST_CASE("Refresh freezes execution but not free descriptor dispatch",
           "[instruction-sequencer]") {
     Config hw("configs/HBM2_8Gb_x128_pim.ini", "/tmp");
+    // Unit harness has no row scheduler or DRAM return feedback.
+    hw.row_lockstep = false;
+    hw.gh_read_delay = false;
     PimInstructionBuffer buffer(16);
     PimInstructionSequencer sequencer(hw);
     auto words = Program();

@@ -36,7 +36,6 @@ class Config {
     Config(std::string config_file, std::string out_dir);
     Address AddressMapping(uint64_t hex_addr) const;
     uint64_t AddressUnmapping(Address addr) const;
-    bool tile_instructions = false;
     bool row_lockstep = false;
     bool gh_read_delay = false;
     size_t instruction_capacity = 16;

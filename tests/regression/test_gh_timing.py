@@ -5,6 +5,7 @@ import sys
 import unittest
 
 import run_regression as regression
+from run_tile_regression import run_case
 
 
 class GlobalReadTimingTest(unittest.TestCase):
@@ -12,11 +13,11 @@ class GlobalReadTimingTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.result = regression.run_case(
+        cls.result = run_case(
             cls.binary, regression.QUICK_CASES["ws_gemm_prompt"])
-        cls.local_result = regression.run_case(
+        cls.local_result = run_case(
             cls.binary, regression.QUICK_CASES["decode_gemv"])
-        cls.refresh_result = regression.run_case(
+        cls.refresh_result = run_case(
             cls.binary, regression.QUICK_CASES["refresh_boundary"])
 
     def test_no_channel_issues_two_global_reads_in_one_cycle(self):

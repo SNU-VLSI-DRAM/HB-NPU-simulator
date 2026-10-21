@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 decode = importlib.import_module("gen_workload_decode")
 prompt = importlib.import_module("gen_workload_prompt")
-trace_generator = importlib.import_module("gen_LLM_trace")
+trace_generator = importlib.import_module("legacy_trace_reference")
 
 
 class WorkloadFormatTest(unittest.TestCase):
@@ -57,7 +57,7 @@ class WorkloadFormatTest(unittest.TestCase):
                 self.assertEqual((Path(folder) / name).read_text(),
                                  "2048, 8, 2, 1, 0\n128, 128, 128\n")
 
-    def test_file_mode_encodes_compact_transactions(self):
+    def test_historical_encoder_reference_vectors(self):
         cases = [
             ("2048, 8, 2, 1, 0\n128, 128, 128\n",
              [0x2c0e, 0x200, 0x8800000402, 0x8800000404, 0x1]),
@@ -70,12 +70,7 @@ class WorkloadFormatTest(unittest.TestCase):
             for contents, addresses in cases:
                 with self.subTest(workload=contents):
                     workload.write_text(contents)
-                    result = subprocess.run(
-                        [sys.executable, str(ROOT / "gen_LLM_trace.py"),
-                         "-f", "False", "-w", str(workload), "-t", str(trace)],
-                        capture_output=True, text=True,
-                    )
-                    self.assertEqual(result.returncode, 0, result.stderr)
+                    trace_generator.gen_pim_trace(workload, trace, -1)
                     self.assertEqual(
                         trace.read_text(),
                         "".join("{}\tPIM\t{}\n".format(hex(addr), cycle)

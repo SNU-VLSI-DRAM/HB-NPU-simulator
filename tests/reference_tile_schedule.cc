@@ -1,15 +1,15 @@
-#include "hbnpu/legacy_tile_scheduler.h"
+#include "reference_tile_schedule.h"
 
 #include <algorithm>
 
 namespace dramsim3 {
 
-LegacyTileScheduler::LegacyTileScheduler(const PimKernelContext& context, int channels)
+ReferenceTileSchedule::ReferenceTileSchedule(const PimKernelContext& context, int channels)
     : context_(context), k_tile_size_(std::min(channels * 16, context.k)) {
     context_.Validate(channels);
 }
 
-bool LegacyTileScheduler::NextCompute(PimComputeBlock& block) {
+bool ReferenceTileSchedule::NextCompute(PimComputeBlock& block) {
     if (m_origin_ >= context_.m) return false;
     block.m_origin = m_origin_;
     block.n_origin = n_origin_;
@@ -33,7 +33,7 @@ bool LegacyTileScheduler::NextCompute(PimComputeBlock& block) {
     return true;
 }
 
-bool LegacyTileScheduler::NextOutput(PimOutputBlock& block) {
+bool ReferenceTileSchedule::NextOutput(PimOutputBlock& block) {
     const auto& config = context_.dataflow;
     const int m_tile = config.df == 1 ? (config.m_tile_size / 128) * config.mcf : config.m_tile_size;
     const int m = config.df == 1 ? std::max(1, context_.m * config.mcf / 128) : context_.m;
@@ -52,7 +52,7 @@ bool LegacyTileScheduler::NextOutput(PimOutputBlock& block) {
     return true;
 }
 
-void LegacyTileScheduler::ProjectProgress(PimExecutionState& state,
+void ReferenceTileSchedule::ProjectProgress(PimExecutionState& state,
                                         bool compute_exhausted,
                                         bool output_exhausted) const {
     if (compute_exhausted) {

@@ -1,10 +1,9 @@
 # HB-NPU Tile Instruction Format
 
-Instruction mode submits explicit tile descriptors to the existing executor.
-It is selected by `[hbnpu] execution_mode = tile_instructions`; without that
-setting, the simulator uses the legacy configuration-transaction format.
-The two formats must not be mixed. The translator is `gen_tile_trace.py` and
-requires only Python 3.7 or newer and its standard library.
+HB-NPU submits explicit tile instructions to the executor. This is the only
+HB-NPU execution path; no `execution_mode` setting is required. Old matrix
+configuration traces must be regenerated with `gen_LLM_trace.py` or
+`gen_tile_trace.py`.
 
 ## Words and packets
 
@@ -139,13 +138,15 @@ or a partial packet at the cycle limit produces an incomplete result.
 
 ## Row boundary synchronization
 
-`row_lockstep` defaults to true in tile-instruction mode and false in legacy
-mode. The CPU packet format is unchanged: the HB-NPU executor decomposes each
+`row_lockstep` defaults to true for HBM with self-refresh disabled. For HBM
+configurations with self-refresh enabled it defaults to false, preserving
+ordinary READ/WRITE simulations. The CPU packet format is unchanged:
+the HB-NPU executor decomposes each
 tile's streamed operand into internal descriptors that stop at a physical
 row boundary or the end of the tile. Resident loading remains separate.
 One row descriptor's command metadata is buffered; no operand buffer is added.
 Set `[hbnpu] row_lockstep = false` for the preceding per-vector scheduling path.
-Row mode requires tile instructions and self-refresh disabled.
+Row lockstep requires HBM and self-refresh disabled.
 
 Before START, controllers drain existing PIM work, perform legal PRE/ACT
 operations (including gang preparation for LH), and wait until every target
@@ -220,4 +221,5 @@ refresh counts may differ, but their timing must remain legal. It reports raw
 cycle deltas without shifting cycles to hide instruction delivery delays.
 For capped runs it compares only common prefixes and reports both operation
 counts; a matching prefix is not a completed kernel. The original
-`compare_binaries.py` continues to require exact command cycles in legacy mode.
+`compare_binaries.py` is retained for historical binary comparisons; it requires
+exact command cycles and does not translate traces for current binaries.

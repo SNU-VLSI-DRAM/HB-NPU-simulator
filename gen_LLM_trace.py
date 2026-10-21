@@ -2,12 +2,15 @@ import os
 import argparse
 import math
 import configparser
-import ast
+from hbnpu_instruction import load_workload, compile_kernel, write_trace
 
 parser = argparse.ArgumentParser()
+parser.add_argument("-p", default="output/traces", help="Model mode: generated instruction trace root")
+parser.add_argument("--overwrite", action="store_true", help="explicitly replace generated trace files")
 parser.add_argument("-w", default=".", help="file mode: workload file path")
 parser.add_argument("-t", default="./sample.trc", help="file mode: trace file path")
-parser.add_argument("-f", default="True", help="Model mode? Set False for file mode (give only -w, -t options)")
+parser.add_argument("-f", default="true", type=str.lower, choices=("true", "false"),
+                    help="Model mode? Set False for file mode (give -w, -t options)")
 parser.add_argument("-m", default="OPT-2.7B", help="Model mode: model configuration to run")
 parser.add_argument("-i", default=1024, help="Model mode: input tokens")
 parser.add_argument("-o", default=128, help="Model mode: output tokens")
@@ -39,52 +42,16 @@ def extract_variables(file_path):
 
 
 
-def gen_pim_trace(workload, trace_file, row_addr):
-    # Single-array format: one dataflow header and one (M, K, N) tuple.
-    with open(workload, 'r') as fin:
-        header = ast.literal_eval(fin.readline())
-        if not isinstance(header, (tuple, list)) or len(header) != 5:
-            raise ValueError("Expected five-field header: tile_M, post_delay, "
-                             "mcf, ucf, df; regenerate legacy workloads")
-        tile_M, post_delay, mcf, ucf, df = header
-        m, k, n = ast.literal_eval(fin.readline())
-        if fin.read().strip():
-            raise ValueError("Expected exactly one (M, K, N) workload")
-
-    # Bits 0..2 identify the transaction; remaining fields are contiguous.
-    config_addr = (3 << 1)
-    config_addr |= int(math.log(mcf, 2)) << 3
-    config_addr |= int(math.log(ucf, 2)) << 6
-    config_addr |= df << 9
-    config_addr |= int(math.log(tile_M, 2)) << 10
-
-    dims = (m, k, n)
-    loadaddrs = []
-    for j, dim in enumerate(dims):
-        if df == 0 and j == 0:
-            dim = int(dim/2)  # GEMM interleaving
-        if df == 1:
-            if j == 0:
-                dim = max(1, int(dim/mcf))
-            elif j == 1:
-                dim = max(1, int(dim/ucf))
-            else:
-                dim *= ucf
-        base_row = 0
-        if df == 0 and j != 0:  # Inputs/outputs in GEMM
-            base_row = int(k*n/1024)+1 if row_addr == -1 else int(row_addr)
-        elif df == 1 and j != 2:  # Inputs/outputs in GEMV
-            base_row = int(k*m/1024)+1 if row_addr == -1 else int(row_addr)
-        loadaddrs.append((j << 1) | (dim << 3) | (base_row << 35))
-
-    with open(trace_file, 'w') as fout:
-        for cycle, addr in enumerate([config_addr] + loadaddrs + [0x1]):
-            fout.write(hex(addr) + '\tPIM\t' + str(cycle) + '\n')
+def gen_pim_trace(workload, trace_file, row_addr, spec="configs/HBNPU_8Gb.ini", *, overwrite=False):
+    context = load_workload(workload, spec, row_addr)
+    # Validate the complete program before opening an existing destination.
+    packets = list(compile_kernel(context))
+    write_trace(packets, trace_file, overwrite=overwrite)
 
 
 if __name__ == "__main__":
     args = parser.parse_args()
-    if eval(args.f):
+    if args.f.lower() == "true":
         model_name, in_tokens, out_tokens, batch_size, spec_path = args.m, int(args.i), int(args.o), int(args.b),  args.s
 
         fin_ = open('models', 'r')
@@ -109,7 +76,7 @@ if __name__ == "__main__":
         weight_rows_per_bank = int(required_capacity / int(TP) / int(PP) / banks / 2 * 10**6) #TODO assuming 2 KB row size
 
 
-        trace_path = "traces/" + "_".join([model_name, str(in_tokens), str(out_tokens), str(batch_size)])
+        trace_path = os.path.join(args.p, "_".join([model_name, str(in_tokens), str(out_tokens), str(batch_size)]))
         print(model_name + " trace is generated in " + trace_path)
 
         prompt_path = "workloads/" + model_name + "/prompt/" + format(in_tokens, '04')
@@ -120,7 +87,7 @@ if __name__ == "__main__":
         if not os.path.exists(trace_path + "/prompt"):
             os.makedirs(trace_path + "/prompt")
         for f in flist:
-            gen_pim_trace(prompt_path + '/' + f, trace_path + "/prompt/" +  f, weight_rows_per_bank)
+            gen_pim_trace(prompt_path + '/' + f, trace_path + "/prompt/" +  f, weight_rows_per_bank, args.s, overwrite=args.overwrite)
 
         decode_path = "workloads/" + model_name + "/decode/"
         QKV_path = decode_path + "QKV/"
@@ -131,7 +98,7 @@ if __name__ == "__main__":
             os.makedirs(trace_path + "/decode")
         for f in flist:
             if not os.path.isdir(decode_path + f):
-                gen_pim_trace(decode_path + f, trace_path + "/decode/" +  f, weight_rows_per_bank)
+                gen_pim_trace(decode_path + f, trace_path + "/decode/" +  f, weight_rows_per_bank, args.s, overwrite=args.overwrite)
 
         if not os.path.exists(trace_path + "/decode/QKV/"):
             os.makedirs(trace_path + "/decode/QKV")
@@ -142,8 +109,8 @@ if __name__ == "__main__":
                 raise Exception("Workload " + QK + " does not exist!")
             if not os.path.exists(QKV_path + SV):
                 raise Exception("Workload " + SV + " does not exist!")
-            gen_pim_trace(QKV_path + QK, trace_path + "/decode/QKV/" + QK, weight_rows_per_bank)
-            gen_pim_trace(QKV_path + SV, trace_path + "/decode/QKV/" + SV, weight_rows_per_bank)
+            gen_pim_trace(QKV_path + QK, trace_path + "/decode/QKV/" + QK, weight_rows_per_bank, args.s, overwrite=args.overwrite)
+            gen_pim_trace(QKV_path + SV, trace_path + "/decode/QKV/" + SV, weight_rows_per_bank, args.s, overwrite=args.overwrite)
 
         flist = os.listdir(WS_path)
         if format(int(batch_size/int(PP)), '04') not in [f.split('_')[0] for f in flist]:
@@ -151,8 +118,8 @@ if __name__ == "__main__":
         if not os.path.exists(trace_path + "/decode/WS"):
             os.makedirs(trace_path + "/decode/WS")
         for f in [f for f in flist if int(batch_size/int(PP)) == int(f.split('_')[0])]:
-            gen_pim_trace(WS_path + f, trace_path + "/decode/WS/" + f.split('_')[1], weight_rows_per_bank)
+            gen_pim_trace(WS_path + f, trace_path + "/decode/WS/" + f.split('_')[1], weight_rows_per_bank, args.s, overwrite=args.overwrite)
 
 
     else:
-        gen_pim_trace(args.w, args.t, -1)
+        gen_pim_trace(args.w, args.t, -1, args.s, overwrite=args.overwrite)

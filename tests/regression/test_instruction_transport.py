@@ -1,5 +1,6 @@
 """Exercise the actual trace CPU and simulator, including EOF under backpressure."""
 import json
+import configparser
 import os
 from pathlib import Path
 import subprocess
@@ -14,6 +15,31 @@ from hbnpu_instruction import KernelConfig, compile_kernel, encode_packet, write
 
 class TransportTest(unittest.TestCase):
     binary = None
+
+    def test_ordinary_hbm_traffic_allows_self_refresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ini = configparser.ConfigParser()
+            ini.read(ROOT / "configs/HBNPU_8Gb.ini")
+            ini["system"]["enable_self_refresh"] = "true"
+            with (tmp / "config.ini").open("w") as stream:
+                ini.write(stream)
+            # RandomCPU exercises ordinary read/write admission directly.
+            result = subprocess.run(
+                [str(self.binary), str(tmp / "config.ini"), "-c", "1000",
+                 "-s", "random", "-o", str(tmp)],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            stats = json.loads((tmp / "dramsim3.json").read_text())
+            self.assertGreater(sum(ch["num_reads_done"] for ch in stats.values()), 0)
+            self.assertGreater(sum(ch["num_writes_done"] for ch in stats.values()), 0)
+
+    def test_default_configuration_executes_instructions(self):
+        result, stats, _, _ = self.run_program(mode=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIsNotNone(stats, "default path did not execute instructions")
+        self.assertTrue(stats["end_completed"])
+        self.assertEqual(stats["row_operations_completed"], 4)
 
     def test_tile_submission_really_executes_row_operations(self):
         result, stats, _, _ = self.run_program()
@@ -40,9 +66,8 @@ class TransportTest(unittest.TestCase):
             trace = folder / "program"
             config.write_text(
                 (ROOT / "configs/HBM2_8Gb_x128_pim.ini").read_text()
-                + "\n[hbnpu]\nexecution_mode = {}\ninstruction_capacity = {}\n".format(
-                    mode, capacity
-                )
+                + "\n[hbnpu]\ninstruction_capacity = {}\n".format(capacity)
+                + ("" if mode is None else "execution_mode = {}\n".format(mode))
             )
             c = KernelConfig(
                 256 if stress else 64,
@@ -129,6 +154,7 @@ class TransportTest(unittest.TestCase):
     def test_invalid_mode_and_capacity_fail(self):
         for mode, cap in [
             ("wrong", "16"),
+            ("legacy", "16"),
             ("tile_instructions", "0"),
             ("tile_instructions", "-1"),
             ("tile_instructions", "oops"),

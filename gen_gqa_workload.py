@@ -35,7 +35,7 @@ def generate(model_config, hardware, output, *, phase, sequence_length,
     ini = configparser.ConfigParser()
     ini.read(hardware)
     if not ini.has_section('hbnpu'): ini.add_section('hbnpu')
-    ini['hbnpu'].update(execution_mode='tile_instructions',row_lockstep='true',gh_read_delay='true')
+    ini['hbnpu'].update(row_lockstep='true',gh_read_delay='true')
     ini['system']['enable_self_refresh'] = 'false'
     manifest = dict(format_version=2,model=asdict(model),phase=phase,
                     sequence_length=sequence_length,batch=batch,modeled_layers=[layer],

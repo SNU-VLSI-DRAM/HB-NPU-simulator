@@ -17,7 +17,7 @@ from hbnpu_instruction import (
     compile_kernel,
     write_trace,
 )
-import gen_LLM_trace as legacy
+import legacy_trace_reference as legacy
 
 CONFIG = ROOT / "configs/HBM2_8Gb_x128_pim.ini"
 

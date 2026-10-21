@@ -52,7 +52,7 @@ class GqaCliTest(unittest.TestCase):
         self.assertEqual((mistral.query_heads,mistral.kv_heads,mistral.head_dim),(32,8,128))
         ini = configparser.ConfigParser()
         ini.read(self.output/'simulator.ini')
-        self.assertEqual(ini['hbnpu']['execution_mode'],'tile_instructions')
+        self.assertNotIn('execution_mode', ini['hbnpu'])
 
     def test_canonical_head_batch_packing_and_split_fallback(self):
         self.hardware = ROOT/'configs/HBNPU_8Gb.ini'
